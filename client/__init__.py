@@ -21,6 +21,7 @@ from .llm_client import (
     get_llm_backend,
     chat_ollama,
     chat_deepseek,
+    chat_vertex,
 )
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "get_llm_backend",
     "chat_ollama",
     "chat_deepseek",
+    "chat_vertex",
 ]
