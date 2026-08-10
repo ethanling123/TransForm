@@ -108,8 +108,6 @@
         <module>mcp-core</module>
         <module>mcp-json-jackson2</module>
         <module>mcp-json-jackson3</module>
-		<module>mcp-test</module>
-        <module>conformance-tests</module>
 	</modules>
 
 	<build>

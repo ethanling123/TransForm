@@ -683,14 +683,18 @@ public class McpToolRegistry {
         Map<String, Object> mat = birdQueryService.materialize(
                 strArg(args, "db_id"), strArg(args, "sql"), intArg(args, "max_rows", 500_000));
         String rid = String.valueOf(mat.get("result_id"));
-        return handleLargeResultAuto(Map.of(
-                "n_rows", mat.get("n_rows"),
-                "n_cols", mat.get("n_cols"),
-                "rows_per_chunk", intArg(args, "rows_per_chunk", 8192),
-                "result_id", rid,
-                "optimization_target", strArg(args, "optimization_target"),
-                "prefer_streaming", boolArg(args, "prefer_streaming", false),
-                "use_mab", boolArg(args, "use_mab", false)));
+        Map<String, Object> forwarded = new HashMap<>();
+        forwarded.put("n_rows", mat.get("n_rows"));
+        forwarded.put("n_cols", mat.get("n_cols"));
+        forwarded.put("rows_per_chunk", intArg(args, "rows_per_chunk", 8192));
+        forwarded.put("result_id", rid);
+        String optimizationTarget = strArg(args, "optimization_target");
+        if (optimizationTarget != null) {
+            forwarded.put("optimization_target", optimizationTarget);
+        }
+        forwarded.put("prefer_streaming", boolArg(args, "prefer_streaming", false));
+        forwarded.put("use_mab", boolArg(args, "use_mab", false));
+        return handleLargeResultAuto(forwarded);
     }
 
     private CallToolResult handleBirdQueryRunInline(Map<String, Object> args) throws Exception {
@@ -836,10 +840,17 @@ public class McpToolRegistry {
         structured.put("mime_type", cfg.getRawMimeType() != null ? cfg.getRawMimeType() : "application/octet-stream");
         structured.put("recommended_format", recommended);
         structured.put("recommendation_target", selTarget.value());
-        structured.put("formats", Map.of(
-                "raw_blob", Map.of("supported", true, "approx_bytes", rawBytes),
-                "gzip_blob", Map.of("supported", true, "approx_bytes", gzipBytes),
-                "text_inline", Map.of("supported", inlineBytes != null, "approx_bytes", inlineBytes)));
+        Map<String, Object> gzipFormat = new LinkedHashMap<>();
+        gzipFormat.put("supported", true);
+        gzipFormat.put("approx_bytes", gzipBytes);
+        Map<String, Object> textInlineFormat = new LinkedHashMap<>();
+        textInlineFormat.put("supported", inlineBytes != null);
+        textInlineFormat.put("approx_bytes", inlineBytes);
+        Map<String, Object> formats = new LinkedHashMap<>();
+        formats.put("raw_blob", Map.of("supported", true, "approx_bytes", rawBytes));
+        formats.put("gzip_blob", gzipFormat);
+        formats.put("text_inline", textInlineFormat);
+        structured.put("formats", formats);
 
         return toolResult("Unstructured format hints.", structured);
     }
@@ -1000,10 +1011,11 @@ public class McpToolRegistry {
             try {
                 return handler.apply(request.arguments());
             } catch (Exception e) {
+                String message = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
                 return CallToolResult.builder()
                         .isError(true)
-                        .content(List.of(new TextContent(null, e.getMessage())))
-                        .structuredContent(Map.of("error", e.getMessage()))
+                        .content(List.of(new TextContent(null, message)))
+                        .structuredContent(Map.of("error", message))
                         .build();
             }
         };

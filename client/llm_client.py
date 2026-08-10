@@ -6,6 +6,8 @@ Supports free / low-cost options as requested:
 - Deep Seek: set DEEPSEEK_API_KEY for api.deepseek.com (low-cost, often free-tier offers).
 - Vertex AI (Gemini): set VERTEX_PROJECT_ID + GCP credentials (ADC or a service
   account via GOOGLE_APPLICATION_CREDENTIALS). Requires `pip install google-auth`.
+- Gemini API (AI Studio): set GEMINI_API_KEY (from https://aistudio.google.com/apikey).
+  No GCP project/billing setup required.
 """
 
 from __future__ import annotations
@@ -15,7 +17,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 import httpx
 
-# Backend selection: "ollama" (Llama via Ollama), "deepseek", or "vertex" (GCP Vertex AI Gemini)
+# Backend selection: "ollama" (Llama via Ollama), "deepseek", "vertex" (GCP Vertex AI
+# Gemini), or "gemini" (AI Studio Gemini API, no GCP project/billing required)
 LLM_BACKEND = os.environ.get("LLM_BACKEND", "ollama").lower()
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
@@ -25,10 +28,13 @@ DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 VERTEX_PROJECT_ID = os.environ.get("VERTEX_PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT", "")
 VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "us-central1")
 VERTEX_MODEL = os.environ.get("VERTEX_MODEL", "gemini-2.0-flash-001")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_BASE_URL = os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
 
-def get_llm_backend() -> Literal["ollama", "deepseek", "vertex"]:
-    if LLM_BACKEND in ("ollama", "deepseek", "vertex"):
+def get_llm_backend() -> Literal["ollama", "deepseek", "vertex", "gemini"]:
+    if LLM_BACKEND in ("ollama", "deepseek", "vertex", "gemini"):
         return LLM_BACKEND  # type: ignore
     return "ollama"
 
@@ -180,10 +186,50 @@ async def chat_vertex(
     return "".join(p.get("text", "") for p in parts).strip()
 
 
+async def chat_gemini(
+    messages: List[Dict[str, str]],
+    *,
+    model: str = GEMINI_MODEL,
+    api_key: Optional[str] = None,
+    base_url: str = GEMINI_BASE_URL,
+    timeout: float = 120.0,
+) -> str:
+    """
+    Call the AI Studio Gemini API's generateContent endpoint.
+
+    Requires GEMINI_API_KEY (from https://aistudio.google.com/apikey). No GCP
+    project or billing setup needed.
+    """
+    key = api_key or GEMINI_API_KEY
+    if not key:
+        raise ValueError(
+            "GEMINI_API_KEY is not set. Set it in the environment or pass api_key=..."
+        )
+    contents, system_instruction = _messages_to_vertex_contents(messages)
+    body: Dict[str, Any] = {"contents": contents}
+    if system_instruction:
+        body["systemInstruction"] = system_instruction
+
+    url = f"{base_url.rstrip('/')}/v1beta/models/{model}:generateContent"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(
+            url,
+            headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+            json=body,
+        )
+        r.raise_for_status()
+        data = r.json()
+    candidates = data.get("candidates") or []
+    if not candidates:
+        return ""
+    parts = (candidates[0].get("content") or {}).get("parts") or []
+    return "".join(p.get("text", "") for p in parts).strip()
+
+
 async def chat(
     messages: List[Dict[str, str]],
     *,
-    backend: Optional[Literal["ollama", "deepseek", "vertex"]] = None,
+    backend: Optional[Literal["ollama", "deepseek", "vertex", "gemini"]] = None,
     **kwargs: Any,
 ) -> str:
     """
@@ -197,6 +243,8 @@ async def chat(
         return await chat_deepseek(messages, **kwargs)
     if backend == "vertex":
         return await chat_vertex(messages, **kwargs)
+    if backend == "gemini":
+        return await chat_gemini(messages, **kwargs)
     raise ValueError(f"Unknown backend: {backend}")
 
 

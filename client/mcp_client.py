@@ -61,12 +61,13 @@ async def connect(
             async with streamable_http_client(base_url, http_client=http_client) as (
                 read_stream,
                 write_stream,
+                *_rest,
             ):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
                     yield session, http_client
     else:
-        async with streamable_http_client(base_url) as (read_stream, write_stream):
+        async with streamable_http_client(base_url) as (read_stream, write_stream, *_rest):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
                 async with httpx.AsyncClient() as client:
@@ -85,7 +86,7 @@ async def call_large_json(
     if result_id is not None:
         args["result_id"] = result_id
     result = await session.call_tool("large_json", arguments=args)
-    return _unwrap_structured_content(result.structured_content)
+    return _unwrap_structured_content(result.structuredContent)
 
 
 async def call_large_parquet_blob(
@@ -100,7 +101,7 @@ async def call_large_parquet_blob(
     if result_id is not None:
         args["result_id"] = result_id
     result = await session.call_tool("large_parquet_blob", arguments=args)
-    desc = result.structured_content or {}
+    desc = result.structuredContent or {}
     if not isinstance(desc.get("url"), str):
         raise RuntimeError(f"Unexpected descriptor from large_parquet_blob: {desc}")
     return desc
@@ -123,7 +124,7 @@ async def call_large_parquet_stream(
     if result_id is not None:
         args["result_id"] = result_id
     result = await session.call_tool("large_parquet_stream", arguments=args)
-    desc = result.structured_content or {}
+    desc = result.structuredContent or {}
     if not isinstance(desc.get("url"), str):
         raise RuntimeError(f"Unexpected descriptor from large_parquet_stream: {desc}")
     return desc
@@ -141,7 +142,7 @@ async def call_large_arrow_ipc_blob(
     if result_id is not None:
         args["result_id"] = result_id
     result = await session.call_tool("large_arrow_ipc_blob", arguments=args)
-    desc = result.structured_content or {}
+    desc = result.structuredContent or {}
     if not isinstance(desc.get("url"), str):
         raise RuntimeError(f"Unexpected descriptor from large_arrow_ipc_blob: {desc}")
     return desc
@@ -164,7 +165,7 @@ async def call_large_arrow_ipc_stream(
     if result_id is not None:
         args["result_id"] = result_id
     result = await session.call_tool("large_arrow_ipc_stream", arguments=args)
-    desc = result.structured_content or {}
+    desc = result.structuredContent or {}
     if not isinstance(desc.get("url"), str):
         raise RuntimeError(f"Unexpected descriptor from large_arrow_ipc_stream: {desc}")
     return desc
@@ -203,7 +204,7 @@ async def call_describe_result_formats(
         )
     except Exception:
         return None
-    data = result.structured_content if result else None
+    data = result.structuredContent if result else None
     if not isinstance(data, dict):
         return None
     formats = data.get("formats")
@@ -302,7 +303,7 @@ async def call_large_result_auto(
     if optimization_target is not None:
         args["optimization_target"] = optimization_target
     result = await session.call_tool("large_result_auto", arguments=args)
-    data = result.structured_content or {}
+    data = result.structuredContent or {}
     if not isinstance(data, dict):
         raise RuntimeError(f"Unexpected structured_content from large_result_auto: {data}")
     return data
@@ -335,7 +336,7 @@ async def call_describe_and_fetch_result(
     if optimization_target is not None:
         args["optimization_target"] = optimization_target
     result = await session.call_tool("describe_and_fetch_result", arguments=args)
-    data = result.structured_content or {}
+    data = result.structuredContent or {}
     if not isinstance(data, dict):
         raise RuntimeError(
             f"Unexpected structured_content from describe_and_fetch_result: {data}"
@@ -353,7 +354,7 @@ async def call_bird_query_json(
     """Execute SQL on server and return inline JSON records."""
     args: Dict[str, Any] = {"db_id": db_id, "sql": sql, "max_rows": max_rows}
     result = await session.call_tool("bird_query_json", arguments=args)
-    return result.structured_content
+    return result.structuredContent
 
 
 async def call_bird_query_materialize(
@@ -366,7 +367,7 @@ async def call_bird_query_materialize(
     """Execute SQL on server, materialize to Parquet, return {result_id,n_rows,n_cols}."""
     args: Dict[str, Any] = {"db_id": db_id, "sql": sql, "max_rows": max_rows}
     result = await session.call_tool("bird_query_materialize", arguments=args)
-    data = result.structured_content or {}
+    data = result.structuredContent or {}
     # Some MCP transports wrap tool results as {"result": {...}}.
     if isinstance(data, dict) and "result" in data and isinstance(data.get("result"), dict):
         data = data["result"]
@@ -399,7 +400,7 @@ async def call_bird_query_auto(
     # Drop None for cleanliness.
     args = {k: v for k, v in args.items() if v is not None}
     result = await session.call_tool("bird_query_auto", arguments=args)
-    data = result.structured_content or {}
+    data = result.structuredContent or {}
     if isinstance(data, dict) and "result" in data and isinstance(data.get("result"), dict):
         data = data["result"]
     if not isinstance(data, dict):
@@ -435,7 +436,7 @@ async def call_bird_query_run_inline(
     }
     args = {k: v for k, v in args.items() if v is not None}
     result = await session.call_tool("bird_query_run_inline", arguments=args)
-    data = result.structured_content or {}
+    data = result.structuredContent or {}
     if isinstance(data, dict) and "result" in data and isinstance(data.get("result"), dict):
         data = data["result"]
     if not isinstance(data, dict):
@@ -465,7 +466,7 @@ async def call_record_format_outcome(
         "time_to_first_rows_s": time_to_first_rows_s,
     }
     result = await session.call_tool("record_format_outcome", arguments=args)
-    data = result.structured_content or {}
+    data = result.structuredContent or {}
     return data if isinstance(data, dict) else {}
 
 
