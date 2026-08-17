@@ -4,8 +4,11 @@ Lightweight LLM client for the workflow.
 Supports free / low-cost options as requested:
 - Ollama (local Llama): free, no API key. Run `ollama run llama3.2` (or similar) first.
 - Deep Seek: set DEEPSEEK_API_KEY for api.deepseek.com (low-cost, often free-tier offers).
-- Vertex AI (Gemini): set VERTEX_PROJECT_ID + GCP credentials (ADC or a service
-  account via GOOGLE_APPLICATION_CREDENTIALS). Requires `pip install google-auth`.
+- Vertex AI (Gemini), two auth modes:
+  * Express mode / Agent Platform: set VERTEX_API_KEY. No project, no google-auth.
+  * Standard Vertex: set VERTEX_PROJECT_ID + GCP credentials (ADC or a service
+    account via GOOGLE_APPLICATION_CREDENTIALS). Requires `pip install google-auth`.
+  VERTEX_API_KEY takes precedence when both are present.
 """
 
 from __future__ import annotations
@@ -24,7 +27,9 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 VERTEX_PROJECT_ID = os.environ.get("VERTEX_PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT", "")
 VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "us-central1")
-VERTEX_MODEL = os.environ.get("VERTEX_MODEL", "gemini-2.0-flash-001")
+VERTEX_MODEL = os.environ.get("VERTEX_MODEL", "gemini-2.5-flash")
+# Express-mode / Agent Platform API key. When set, used instead of OAuth (ADC).
+VERTEX_API_KEY = os.environ.get("VERTEX_API_KEY", "")
 
 
 def get_llm_backend() -> Literal["ollama", "deepseek", "vertex"]:
@@ -124,53 +129,68 @@ async def chat_vertex(
     model: str = VERTEX_MODEL,
     project_id: Optional[str] = None,
     location: str = VERTEX_LOCATION,
+    api_key: Optional[str] = None,
     timeout: float = 120.0,
 ) -> str:
     """
     Call Vertex AI's generateContent REST endpoint for a Gemini model.
 
-    Requires `pip install google-auth` and GCP credentials: either
-    Application Default Credentials (`gcloud auth application-default login`)
-    or a service account key referenced by GOOGLE_APPLICATION_CREDENTIALS.
-    Requires VERTEX_PROJECT_ID (or GOOGLE_CLOUD_PROJECT) to be set.
+    Two auth modes, API key first:
+
+    - Express mode / Agent Platform: VERTEX_API_KEY (or api_key=). Hits the
+      global aiplatform endpoint, which takes no project or location.
+    - Standard Vertex: VERTEX_PROJECT_ID (or GOOGLE_CLOUD_PROJECT) plus ADC
+      (`gcloud auth application-default login`) or a service account key in
+      GOOGLE_APPLICATION_CREDENTIALS. Requires `pip install google-auth`.
+
+    Note that model availability differs between the two: express-mode
+    projects may expose only a subset (e.g. gemini-2.5-flash / -pro).
     """
-    project = project_id or VERTEX_PROJECT_ID
-    if not project:
-        raise ValueError(
-            "VERTEX_PROJECT_ID (or GOOGLE_CLOUD_PROJECT) is not set. "
-            "Set it to your GCP project ID."
-        )
-    try:
-        import google.auth
-        import google.auth.transport.requests
-    except ImportError as e:
-        raise RuntimeError(
-            "google-auth is required for the vertex backend: pip install google-auth"
-        ) from e
-
-    creds, _ = google.auth.default(
-        scopes=["https://www.googleapis.com/auth/cloud-platform"]
-    )
-    creds.refresh(google.auth.transport.requests.Request())
-
     contents, system_instruction = _messages_to_vertex_contents(messages)
     body: Dict[str, Any] = {"contents": contents}
     if system_instruction:
         body["systemInstruction"] = system_instruction
 
-    url = (
-        f"https://{location}-aiplatform.googleapis.com/v1/projects/{project}"
-        f"/locations/{location}/publishers/google/models/{model}:generateContent"
-    )
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {creds.token}",
-                "Content-Type": "application/json",
-            },
-            json=body,
+    key = api_key or VERTEX_API_KEY
+    if key:
+        url = (
+            "https://aiplatform.googleapis.com/v1/publishers/google/models/"
+            f"{model}:generateContent"
         )
+        params: Dict[str, str] = {"key": key}
+        headers = {"Content-Type": "application/json"}
+    else:
+        project = project_id or VERTEX_PROJECT_ID
+        if not project:
+            raise ValueError(
+                "No Vertex credentials. Set VERTEX_API_KEY for express mode, or "
+                "VERTEX_PROJECT_ID (or GOOGLE_CLOUD_PROJECT) for standard Vertex."
+            )
+        try:
+            import google.auth
+            import google.auth.transport.requests
+        except ImportError as e:
+            raise RuntimeError(
+                "google-auth is required for OAuth-based Vertex access: "
+                "pip install google-auth"
+            ) from e
+
+        creds, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        creds.refresh(google.auth.transport.requests.Request())
+        url = (
+            f"https://{location}-aiplatform.googleapis.com/v1/projects/{project}"
+            f"/locations/{location}/publishers/google/models/{model}:generateContent"
+        )
+        params = {}
+        headers = {
+            "Authorization": f"Bearer {creds.token}",
+            "Content-Type": "application/json",
+        }
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(url, headers=headers, params=params, json=body)
         r.raise_for_status()
         data = r.json()
     candidates = data.get("candidates") or []
