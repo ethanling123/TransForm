@@ -80,3 +80,10 @@ novas-workshop/*.synctex.gz
 results/format_mab_state.json
 results/format_selection_history.jsonl
 results/format_hints.sqlite*
+
+# --- Restored Python server and results report are part of the repo ---
+!python-server/*.py
+!python-server/*.md
+!python-server/tests/
+!REPORT.md
+!benchmarks/scripts/

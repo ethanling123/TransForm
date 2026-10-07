@@ -1,0 +1,44 @@
+# TransForm Python server
+
+Python implementation of the TransForm MCP server: a control plane (small JSON over MCP) plus a data plane
+(Parquet, Arrow IPC, raw and gzip payloads over HTTP), with a format selector that picks the representation
+per result. It exposes the same 18 MCP tools, with the same argument schemas, as `../java-server/`
+(checked with `python -m benchmarks.analysis.parity --a <python-port> --b <java-port>` from the repo root).
+
+Restored from the original Python implementation (commit `55de98c`) and changed in three places:
+- duplicate SQL column names are renamed (`name`, `name_1`) instead of failing,
+- mixed-type SQLite columns are cast to strings, and invalid UTF-8 text is replaced,
+- the `describe_and_fetch_result` tool was added (Java had it, Python did not).
+
+It runs on the stock `mcp` package; the vendored SDK fork from the old tree is not needed.
+
+## Run
+
+```bash
+cd python-server
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+BIRD_SQLITE_ROOT=/path/to/dev_20240627 PARQUET_ENCODING_STRATEGY=data_driven \
+  .venv/bin/uvicorn server_app:app --host 127.0.0.1 --port 8000
+```
+
+MCP endpoint: `http://localhost:8000/mcp/mcp`. The client and sweep scripts are in `../client/`.
+
+## Configuration (environment)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BIRD_SQLITE_ROOT` | none | folder holding `dev_databases/<db>/<db>.sqlite` (BIRD and Spider layout) |
+| `PARQUET_COMPRESSION` | `snappy` | Parquet codec |
+| `PARQUET_ENCODING_STRATEGY` | `default` | `data_driven` picks per-column encodings (the paper's setting) |
+| `ARROW_IPC_COMPRESSION` | `none` | `none`, `lz4` or `zstd` |
+| `FORMAT_SELECT_TARGET` | `min_latency` | `min_bytes`, `min_latency` or `min_time_to_first_rows` |
+| `FORMAT_LATENCY_NETWORK_MBPS` | `0` | link rate the latency target assumes; at 0 it falls back to bytes |
+| `SQLITE_QUERY_TIMEOUT_S` | `30` | queries slower than this are interrupted |
+| `TRANSFORM_SCRATCH_DIR` | the source folder | where generated files go (`data/materialized/`, `results/`); the benchmark scripts use `results/scratch/` |
+| `MCP_API_KEY` | unset | when set, every request needs `Authorization: Bearer <key>` |
+
+## Known limitations
+
+- A query that returns zero rows is rejected ("Empty result"); there is nothing to transport.
+- Gold queries slower than the timeout fail (BIRD dev 518 and 701 take 32 s and 168 s in plain SQLite).
+- The security gaps listed in `../REPORT.md` (shared bearer key, no result expiry, wide-open CORS) are unchanged.
