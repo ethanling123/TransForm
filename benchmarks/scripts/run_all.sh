@@ -31,6 +31,14 @@ fi
 
 benchmarks/scripts/run_network.sh > results/logs/network.log 2>&1
 
+# table codec sweep (in-process, needs the server environment for pandas)
+python-server/.venv/bin/python -m benchmarks.sweeps.codecs > results/logs/codecs.log 2>&1
+
+# images, speech and text: in-process media codecs, then the unstructured arms through the server
+[ -d data/audio ] || $PY -m benchmarks.datasets.speech   # macOS only (uses `say`); needs ffmpeg
+benchmarks/scripts/run_media.sh
+benchmarks/scripts/run_payloads.sh > results/logs/payloads.log 2>&1
+
 # tool parity between the two servers (ports 8000 = Python, 8002 = Java)
 if [ -z "$SKIP_JAVA" ]; then
   stop_servers
@@ -42,5 +50,6 @@ if [ -z "$SKIP_JAVA" ]; then
   stop_servers
 fi
 
+clean_scratch
 $PY -m benchmarks.analysis.report
 echo ALL_DONE

@@ -2,4 +2,5 @@ mcp==1.30.0
 httpx
 google-auth
 pyarrow
+Pillow==12.3.0
 duckdb

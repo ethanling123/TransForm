@@ -116,6 +116,77 @@ def replication_section():
     return md(rows, ["parquet encoding", "strategy / agreement", "run 1 total (s)", "run 2 total (s)", "difference"])
 
 
+def codecs_section():
+    if not (R / "codecs/codecs.csv").exists():
+        return "Not available: run `python-server/.venv/bin/python -m benchmarks.sweeps.codecs`."
+    return run_module("benchmarks.analysis.codecs").replace("#### ", "##### ")
+
+
+def formats_sections():
+    media = payloads = "Not available: run `benchmarks/scripts/run_media.sh` and `benchmarks/scripts/run_payloads.sh`."
+    if (R / "media/images.csv").exists():
+        media = run_module("benchmarks.analysis.media").replace("#### ", "##### ")
+    if (R / "payloads/localhost.csv").exists():
+        payloads = run_module("benchmarks.analysis.payloads").replace("#### ", "##### ")
+    return media, payloads
+
+
+def formats_findings():
+    """Computed bullets for the image, audio and payload results; empty if those runs are absent."""
+    if not (R / "media/images.csv").exists() or not (R / "payloads/localhost.csv").exists():
+        return ""
+    img, aud = load("media/images.csv"), load("media/audio.csv")
+
+    def share(rows, arm, base_arm):
+        """Bytes of one arm as a percentage of another arm's bytes."""
+        a = sum(int(r["bytes"]) for r in rows if r["arm"] == arm)
+        return a / sum(int(r["bytes"]) for r in rows if r["arm"] == base_arm) * 100
+
+    def share_of_source(rows, arm):
+        """Bytes of one image arm as a percentage of the original PNG files."""
+        a = sum(int(r["bytes"]) for r in rows if r["arm"] == arm)
+        return a / sum(int(r["png_bytes"]) for r in rows if r["arm"] == arm) * 100
+
+    def psnr(arm):
+        vals = sorted(float(r["psnr_db"]) for r in img if r["arm"] == arm)
+        return vals[len(vals) // 2]
+
+    n_img = len({r["image"] for r in img})
+    out = [
+        f"- **Images** ({n_img} M3-Bench PNGs): lossless WebP is {share_of_source(img, 'webp-lossless'):.0f}% of the source "
+        f"PNG bytes; lossy WebP q80 is {share_of_source(img, 'webp-q80'):.0f}% (median PSNR {psnr('webp-q80'):.1f} dB) and "
+        f"AVIF q60 is {share_of_source(img, 'avif-q60'):.0f}% ({psnr('avif-q60'):.1f} dB). PSNR only measures pixel change; "
+        f"whether a model still answers correctly was not measured.",
+        f"- **Speech** ({len({r['clip'] for r in aud})} synthesized clips): FLAC is {share(aud, 'flac-44k', 'wav-44k'):.0f}% of the "
+        f"44.1 kHz WAV, 16 kHz mono WAV alone is {share(aud, 'wav-16k', 'wav-44k'):.0f}%, and Opus at 24 kbit/s is "
+        f"{share(aud, 'opus-24k', 'wav-44k'):.0f}%. Recognition accuracy was not measured.",
+    ]
+    loc = load("payloads/localhost.csv")
+    text = [r for r in loc if r["kind"] == "text"]
+    raw_text = sum(int(r["raw_bytes"]) for r in text if r["strategy"] == "raw")
+    wire = lambda strat: sum(int(r["wire_bytes"]) for r in text if r["strategy"] == strat) / raw_text * 100
+    out.append(f"- **Text and JSON** ({len({r['payload'] for r in text})} payloads, {raw_text / 1e6:.0f} MB): gzip sends "
+               f"{wire('gzip'):.0f}% of the raw bytes, zstd {wire('zstd'):.0f}%, brotli {wire('brotli'):.0f}%.")
+    cases = []
+    for run in ("localhost", "lan", "wan", "cellular", "badwifi"):
+        if not (R / f"payloads/{run}.csv").exists():
+            continue
+        rows = load(f"payloads/{run}.csv")
+        for kind in ("image", "audio", "text"):
+            rs = [r for r in rows if r["kind"] == kind]
+            t = lambda strat: sum(float(r["latency_s"]) for r in rs if r["strategy"] == strat)
+            best = min(t(strat) for strat in ("raw", "gzip", "zstd", "brotli"))
+            cases.append((t("selector min_latency") / best, f"{kind}, {run}"))
+    close = [c for c in cases if c[0] <= 1.15]
+    far = sorted((c for c in cases if c[0] > 1.15), reverse=True)
+    out.append(f"- **Selector on unstructured payloads:** its total latency is within 15% of the best fixed arm in "
+               f"{len(close)} of {len(cases)} kind and network combinations. The rest are slower: "
+               + "; ".join(f"{label} {ratio:.1f}x" for ratio, label in far)
+               + ". It picks the smallest arm by size and does not model compression time, so where bytes are cheap "
+                 "(localhost, LAN) the size hints and the extra compression cost more than they save.")
+    return "\n".join(out)
+
+
 def synthetic_section():
     out = []
     for name, label in (("synthetic/python.csv", "Python server"), ("synthetic/java.csv", "Java server")):
@@ -157,6 +228,9 @@ def main():
     tpcds_table, tpcds_ttfr = tpcds_section()
     synthetic = synthetic_section()
     replication = replication_section()
+    codecs = codecs_section()
+    media, payloads = formats_sections()
+    formats = formats_findings()
     speed = netem_speedups()
     lo, hi = min(speed), max(speed)
     bound = "at or below" if lo[0] >= 1.0 else "not always below"
@@ -208,6 +282,8 @@ Each side's tool names and argument schemas are compared by `python -m benchmark
 | Spider 1.0 (dev) | 1,034 gold SQL queries on the 20 dev databases (from `spider_data.zip`, 206 MB) | [2] |
 | TPC-DS | `catalog_sales` at scale factor 1 (1,441,548 rows x 34 columns) generated with DuckDB's `dsdgen`, grid of 10K/100K/500K rows x 6/20/34 columns taken from the original harness | [3], [4] |
 | Synthetic | generated tables from 100 to 500,000 rows, 10 columns | this repo (`benchmarks/sweeps/synthetic.py`) |
+| M3-Bench images | the 212 PNG images from the Open-M3-Bench dataset (350 MB). They are the benchmark's task inputs (photos and screenshots), not tool results | [5] |
+| Synthesized speech | 14 passages from this repo's docs, spoken by 7 macOS `say` voices, 44.1 kHz mono WAV (35 MB). No real recordings | `benchmarks/datasets/speech.py` |
 
 ## Results
 
@@ -251,7 +327,37 @@ bytes match). With `data_driven` encoding the Python server delta-encodes them, 
 magnitude smaller than JSON; Java writes plain-encoded Parquet. This is a best case for delta encoding and does not
 represent real data: use the BIRD, Spider and TPC-DS tables for compression claims.
 
-### 6. Replication (two runs of the Python server on BIRD dev)
+### 6. Table codecs (in-process; 21 arms)
+
+Every Parquet codec the server accepts (none, snappy, lz4, gzip, brotli, zstd levels 1/3/9/19) under both encoding
+strategies, plus Arrow IPC (none, lz4, zstd), on the five BIRD results above 50K cells and two TPC-DS slices. Encode and
+decode times are measured in-process (median of 3, one machine); network times are modelled as bytes / bandwidth + decode
+(+ encode), with the paper's four bandwidths and no delay term since it is the same for every arm. Agent results are
+usually fetched once, so the "encoded per request" table is the realistic one; "pre-encoded" only applies to results
+fetched repeatedly. The BIRD results are narrow (1 to 3 columns), so they say little about wide string tables.
+
+{codecs}
+
+### 7. Images and audio: codec comparison (in-process)
+
+Every image and audio arm measured on the real files, no server. Image fidelity is PSNR against the original (alpha
+flattened onto white); it is a pixel-difference proxy, not task accuracy. Encode times for images ran four at a time, so
+they are inflated; audio times include ffmpeg's start-up (a few tens of ms) and the audio is synthetic speech, which is
+cleaner than field recordings.
+
+{media}
+
+### 8. Unstructured payloads through the server
+
+Images, speech and text/JSON/CSV documents through the five unstructured arms (raw, gzip, zstd, brotli, inline text) and
+the selector. Each strategy uploads a fresh copy first (upload excluded), so every arm pays its own compression cost cold;
+the selector rows also pay for computing the size hints. Forced arms include one MCP ping standing in for the tool call
+that returns their URL, so every row pays one control-plane round trip. Wire bytes are what crossed the connection; every fetch was
+decoded and compared with the original. The network rows use every 9th image.
+
+{payloads}
+
+### 9. Replication (two runs of the Python server on BIRD dev)
 
 Run 1 used a server file that was missing five global definitions (hints cache, hint store, MAB state path; restored
 afterwards, found by a regression test). None are used when results are registered through `/materialized` or
@@ -278,6 +384,7 @@ summed over the same queries. This is the only measure of run-to-run variation i
   derived ids now share the source's cache and release it when the source is evicted from the LRU.
 - **Java gaps found:** it fails on duplicate column names (BIRD 900 and 901), ignores the `data_driven` Parquet strategy
   (identical bytes under both settings), and its Parquet files are larger than Python's.
+{formats}
 - The TPC-DS table shows Python's Arrow IPC output is larger than Java's on wide tables; the cause was not investigated.
 
 ## Limitations
@@ -293,8 +400,11 @@ summed over the same queries. This is the only measure of run-to-run variation i
 - Zero-row results are rejected by the server and are excluded (Spider: see section 2).
 - Security was neither audited nor changed. Reading the Java server's code showed a single shared bearer key (when set),
   no result expiry and wide-open CORS; the Python server was not reviewed for these. Nothing here measures them.
-- Not done: the bandit (`use_mab`) was not run, no LLM accuracy or token measurement, no multimodal
-  payloads.
+- The zstd and brotli arms, the tiny-text rule and the already-compressed check exist only in the Python server; the Java
+  server has no equivalents, so section 8 has no Java comparison.
+- The image set is M3-Bench's task inputs, not tool-returned images; the speech is synthetic; PDFs and video are not covered.
+  Lossy arms were not tested for effect on model answers.
+- Not done: the bandit (`use_mab`) was not run, no LLM accuracy or token measurement.
 
 ## Reproduce
 
@@ -304,6 +414,9 @@ summed over the same queries. This is the only measure of run-to-run variation i
 #   Spider:   spider_data.zip (206 MB) from https://yale-lily.github.io/spider ; unzip to data/spider_data,
 #             then: mkdir data/spider_root && ln -s ../spider_data/database data/spider_root/dev_databases
 #   TPC-DS:   python -m benchmarks.datasets.tpcds   (needs duckdb; writes data/tpcds_catalog_sales_sf1.parquet)
+#   M3-Bench images: the images/ folder of https://huggingface.co/datasets/EtaYang10th/Open-M3-Bench (350 MB, 212 PNGs),
+#             saved to data/m3bench/images
+#   Speech:   python -m benchmarks.datasets.speech   (macOS `say` plus ffmpeg; writes data/audio)
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cd python-server && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && cd ..
 benchmarks/scripts/run_all.sh                 # every measurement above, then rebuilds this report (hours)
@@ -330,7 +443,11 @@ https://dl.acm.org/doi/10.5555/1182635.1164217
 [4] Transaction Processing Performance Council. "TPC-DS Benchmark Specification."
 https://www.tpc.org/tpc_documents_current_versions/current_specifications5.asp
 
-[5] S. Mukkera, C. Liu. "TransForm: Dynamic Format Selection for MCP Tool Outputs in Agentic Data Systems." VLDB 2026
+[5] Y. Zhou, M. Zhao, Z. Wang, D. Gu, B. Guo, R. Ye, L. Han, C. Jin, D. N. Metaxas. "M3-Bench: Multi-Modal, Multi-Hop,
+Multi-Threaded Tool-Using MLLM Agent Benchmark." arXiv:2511.17729, 2025. https://arxiv.org/abs/2511.17729
+(images: https://huggingface.co/datasets/EtaYang10th/Open-M3-Bench; code: https://github.com/EtaYang10th/Open-M3-Bench, MIT)
+
+[6] S. Mukkera, C. Liu. "TransForm: Dynamic Format Selection for MCP Tool Outputs in Agentic Data Systems." VLDB 2026
 Workshop: NOVAS (source: `novas-workshop/main.tex`; the baseline this work reproduces).
 """
     Path("REPORT.md").write_text(text)

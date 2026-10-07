@@ -32,6 +32,8 @@ Each side's tool names and argument schemas are compared by `python -m benchmark
 | Spider 1.0 (dev) | 1,034 gold SQL queries on the 20 dev databases (from `spider_data.zip`, 206 MB) | [2] |
 | TPC-DS | `catalog_sales` at scale factor 1 (1,441,548 rows x 34 columns) generated with DuckDB's `dsdgen`, grid of 10K/100K/500K rows x 6/20/34 columns taken from the original harness | [3], [4] |
 | Synthetic | generated tables from 100 to 500,000 rows, 10 columns | this repo (`benchmarks/sweeps/synthetic.py`) |
+| M3-Bench images | the 212 PNG images from the Open-M3-Bench dataset (350 MB). They are the benchmark's task inputs (photos and screenshots), not tool results | [5] |
+| Synthesized speech | 14 passages from this repo's docs, spoken by 7 macOS `say` voices, 44.1 kHz mono WAV (35 MB). No real recordings | `benchmarks/datasets/speech.py` |
 
 ## Results
 
@@ -245,7 +247,249 @@ bytes match). With `data_driven` encoding the Python server delta-encodes them, 
 magnitude smaller than JSON; Java writes plain-encoded Parquet. This is a best case for delta encoding and does not
 represent real data: use the BIRD, Spider and TPC-DS tables for compression claims.
 
-### 6. Replication (two runs of the Python server on BIRD dev)
+### 6. Table codecs (in-process; 21 arms)
+
+Every Parquet codec the server accepts (none, snappy, lz4, gzip, brotli, zstd levels 1/3/9/19) under both encoding
+strategies, plus Arrow IPC (none, lz4, zstd), on the five BIRD results above 50K cells and two TPC-DS slices. Encode and
+decode times are measured in-process (median of 3, one machine); network times are modelled as bytes / bandwidth + decode
+(+ encode), with the paper's four bandwidths and no delay term since it is the same for every arm. Agent results are
+usually fetched once, so the "encoded per request" table is the realistic one; "pre-encoded" only applies to results
+fetched repeatedly. The BIRD results are narrow (1 to 3 columns), so they say little about wide string tables.
+
+##### Smallest and largest output per dataset (MB; in-memory Arrow size for reference)
+
+| dataset | rows x cols | in memory | smallest arm | MB | largest arm | MB |
+|---|---|---|---|---|---|---|
+| bird-305 | 21056 x 3 | 1.0 | parquet/data_driven zstd-19 | 0.06 | arrow_ipc none | 1.04 |
+| bird-346 | 29936 x 2 | 0.9 | parquet/data_driven zstd-19 | 0.05 | arrow_ipc none | 0.87 |
+| bird-384 | 228765 x 2 | 14.1 | parquet/default zstd-19 | 0.77 | arrow_ipc none | 14.12 |
+| bird-403 | 28639 x 2 | 1.0 | parquet/data_driven zstd-19 | 0.20 | arrow_ipc none | 0.99 |
+| bird-406 | 278230 x 1 | 2.2 | arrow_ipc zstd | 0.03 | arrow_ipc none | 2.23 |
+| tpcds-100Kx34 | 100000 x 34 | 39.6 | parquet/data_driven zstd-19 | 5.57 | arrow_ipc none | 39.57 |
+| tpcds-500Kx34 | 500000 x 34 | 197.9 | parquet/data_driven zstd-19 | 27.24 | arrow_ipc none | 197.83 |
+
+##### Best arm per network profile, modelled time, pre-encoded (transfer + decode)
+
+| dataset | LAN | WAN | Cellular | BadWifi |
+|---|---|---|---|---|
+| bird-305 | parquet/data_driven zstd-9 (1 ms) | parquet/data_driven zstd-19 (11 ms) | parquet/data_driven zstd-19 (51 ms) | parquet/data_driven zstd-19 (102 ms) |
+| bird-346 | parquet/data_driven zstd-3 (1 ms) | parquet/data_driven zstd-19 (8 ms) | parquet/data_driven zstd-19 (40 ms) | parquet/data_driven zstd-19 (80 ms) |
+| bird-384 | parquet/data_driven zstd-19 (9 ms) | parquet/data_driven zstd-19 (127 ms) | parquet/data_driven zstd-19 (623 ms) | parquet/data_driven zstd-19 (1243 ms) |
+| bird-403 | arrow_ipc zstd (2 ms) | parquet/data_driven zstd-19 (34 ms) | parquet/data_driven zstd-19 (162 ms) | parquet/data_driven zstd-19 (323 ms) |
+| bird-406 | arrow_ipc zstd (1 ms) | arrow_ipc zstd (5 ms) | arrow_ipc zstd (22 ms) | arrow_ipc zstd (43 ms) |
+| tpcds-100Kx34 | parquet/data_driven zstd-1 (49 ms) | parquet/data_driven zstd-19 (896 ms) | parquet/data_driven zstd-19 (4459 ms) | parquet/data_driven zstd-19 (8912 ms) |
+| tpcds-500Kx34 | parquet/data_driven zstd-9 (236 ms) | parquet/data_driven zstd-19 (4379 ms) | parquet/data_driven zstd-19 (21809 ms) | parquet/data_driven zstd-19 (43597 ms) |
+
+##### Best arm per network profile, modelled time, encoded per request (encode + transfer + decode)
+
+| dataset | LAN | WAN | Cellular | BadWifi |
+|---|---|---|---|---|
+| bird-305 | arrow_ipc zstd (2 ms) | parquet/data_driven zstd-3 (15 ms) | parquet/data_driven brotli (57 ms) | parquet/data_driven brotli (107 ms) |
+| bird-346 | parquet/data_driven lz4 (2 ms) | parquet/data_driven zstd-1 (10 ms) | parquet/data_driven zstd-3 (42 ms) | parquet/data_driven zstd-9 (83 ms) |
+| bird-384 | arrow_ipc zstd (14 ms) | parquet/data_driven zstd-1 (143 ms) | parquet/data_driven zstd-1 (672 ms) | parquet/data_driven zstd-1 (1333 ms) |
+| bird-403 | arrow_ipc zstd (3 ms) | parquet/data_driven zstd-3 (40 ms) | parquet/data_driven brotli (177 ms) | parquet/data_driven brotli (342 ms) |
+| bird-406 | arrow_ipc zstd (1 ms) | arrow_ipc zstd (5 ms) | arrow_ipc zstd (22 ms) | arrow_ipc zstd (43 ms) |
+| tpcds-100Kx34 | arrow_ipc zstd (55 ms) | parquet/data_driven zstd-1 (950 ms) | parquet/data_driven zstd-3 (4553 ms) | parquet/data_driven zstd-9 (9017 ms) |
+| tpcds-500Kx34 | arrow_ipc zstd (273 ms) | parquet/data_driven zstd-1 (4649 ms) | parquet/data_driven zstd-3 (22242 ms) | parquet/data_driven zstd-9 (44085 ms) |
+
+##### One dataset in full: tpcds-500Kx34 (bytes MB, encode ms, decode ms)
+
+| arm | MB | encode ms | decode ms |
+|---|---|---|---|
+| parquet/data_driven zstd-19 | 27.24 | 2241 | 21 |
+| parquet/data_driven zstd-9 | 27.29 | 400 | 17 |
+| parquet/data_driven brotli | 27.38 | 818 | 33 |
+| parquet/data_driven zstd-3 | 27.46 | 251 | 21 |
+| parquet/data_driven zstd-1 | 27.53 | 225 | 19 |
+| parquet/data_driven gzip | 27.91 | 3376 | 31 |
+| arrow_ipc zstd | 29.55 | 25 | 12 |
+| parquet/default brotli | 30.63 | 850 | 41 |
+| parquet/default zstd-19 | 30.85 | 2033 | 29 |
+| parquet/default zstd-9 | 31.03 | 424 | 27 |
+| parquet/default gzip | 31.21 | 3105 | 36 |
+| parquet/default zstd-3 | 31.24 | 338 | 28 |
+| parquet/default zstd-1 | 31.34 | 327 | 27 |
+| parquet/data_driven lz4 | 34.29 | 197 | 15 |
+| parquet/data_driven snappy | 34.67 | 192 | 16 |
+| parquet/default lz4 | 35.68 | 299 | 23 |
+| parquet/default snappy | 36.03 | 298 | 23 |
+| parquet/data_driven none | 37.13 | 184 | 15 |
+| parquet/default none | 38.49 | 288 | 23 |
+| arrow_ipc lz4 | 46.71 | 24 | 5 |
+| arrow_ipc none | 197.83 | 15 | 0 |
+
+### 7. Images and audio: codec comparison (in-process)
+
+Every image and audio arm measured on the real files, no server. Image fidelity is PSNR against the original (alpha
+flattened onto white); it is a pixel-difference proxy, not task accuracy. Encode times for images ran four at a time, so
+they are inflated; audio times include ffmpeg's start-up (a few tens of ms) and the audio is synthetic speech, which is
+cleaner than field recordings.
+
+##### Images: 212 M3-Bench PNGs (350.4 MB)
+
+| arm | total MB | % of source PNG | median encode ms | median decode ms | PSNR dB, median (min) |
+|---|---|---|---|---|---|
+| png | 352.5 | 100.6% | 40 | 12 | lossless |
+| webp-lossless | 245.9 | 70.2% | 308 | 12 | lossless |
+| webp-q90 | 53.9 | 15.4% | 58 | 9 | 40.4 (min 24.8) |
+| webp-q80 | 35.2 | 10.0% | 51 | 7 | 36.9 (min 24.7) |
+| webp-q60 | 24.7 | 7.0% | 47 | 5 | 34.7 (min 24.4) |
+| avif-q80 | 43.8 | 12.5% | 88 | 5 | 40.4 (min 24.7) |
+| avif-q60 | 25.7 | 7.3% | 74 | 4 | 36.4 (min 24.5) |
+| avif-q40 | 12.0 | 3.4% | 56 | 3 | 32.0 (min 23.7) |
+| jpeg-q90 | 67.5 | 19.3% | 2 | 2 | 40.2 (min 24.6) |
+| jpeg-q75 | 42.2 | 12.0% | 2 | 2 | 35.5 (min 23.8) |
+| png-1024px | 179.3 | 51.2% | 29 | 8 | n/a: resized for 127 of 212 images |
+| webp-q80-1024px | 18.9 | 5.4% | 35 | 5 | n/a: resized for 127 of 212 images |
+
+##### Audio: 14 synthesized speech clips (419 s)
+
+| arm | total MB | % of 44.1 kHz WAV | avg kbit/s | median encode ms | median decode ms |
+|---|---|---|---|---|---|
+| wav-44k | 36.98 | 100.0% | 706 | 58 | 56 |
+| wav-16k | 13.42 | 36.3% | 256 | 61 | 46 |
+| flac-44k | 13.41 | 36.3% | 256 | 67 | 45 |
+| flac-16k | 8.14 | 22.0% | 155 | 56 | 44 |
+| opus-32k | 1.53 | 4.1% | 29 | 246 | 77 |
+| opus-24k | 1.18 | 3.2% | 23 | 247 | 77 |
+| opus-12k | 0.64 | 1.7% | 12 | 248 | 75 |
+| aac-48k | 2.76 | 7.5% | 53 | 274 | 60 |
+| mp3-64k | 3.36 | 9.1% | 64 | 169 | 58 |
+
+### 8. Unstructured payloads through the server
+
+Images, speech and text/JSON/CSV documents through the five unstructured arms (raw, gzip, zstd, brotli, inline text) and
+the selector. Each strategy uploads a fresh copy first (upload excluded), so every arm pays its own compression cost cold;
+the selector rows also pay for computing the size hints. Forced arms include one MCP ping standing in for the tool call
+that returns their URL, so every row pays one control-plane round trip. Wire bytes are what crossed the connection; every fetch was
+decoded and compared with the original. The network rows use every 9th image.
+
+##### localhost (no emulation)
+
+| payloads | strategy | wire MB | % of raw | total latency (s) | selector choices |
+|---|---|---|---|---|---|
+| image (212, 350 MB) | raw | 350.41 | 100% | 0.9 |  |
+| image (212, 350 MB) | gzip | 349.16 | 100% | 6.8 |  |
+| image (212, 350 MB) | zstd | 349.36 | 100% | 1.3 |  |
+| image (212, 350 MB) | brotli | 349.30 | 100% | 1.7 |  |
+| image (212, 350 MB) | selector min_bytes | 349.22 | 100% | 3.8 | brotli: 35, gzip: 66, raw: 111 |
+| image (212, 350 MB) | selector min_latency | 349.22 | 100% | 3.9 | brotli: 35, gzip: 66, raw: 111 |
+| audio (14, 37 MB) | raw | 36.98 | 100% | 0.1 |  |
+| audio (14, 37 MB) | gzip | 30.85 | 83% | 1.3 |  |
+| audio (14, 37 MB) | zstd | 31.05 | 84% | 0.2 |  |
+| audio (14, 37 MB) | brotli | 30.42 | 82% | 0.5 |  |
+| audio (14, 37 MB) | selector min_bytes | 30.42 | 82% | 1.8 | brotli: 14 |
+| audio (14, 37 MB) | selector min_latency | 30.42 | 82% | 1.8 | brotli: 14 |
+| text (8, 34 MB) | raw | 34.40 | 100% | 0.1 |  |
+| text (8, 34 MB) | gzip | 3.76 | 11% | 0.4 |  |
+| text (8, 34 MB) | zstd | 2.97 | 9% | 0.1 |  |
+| text (8, 34 MB) | brotli | 2.84 | 8% | 0.2 |  |
+| text (8, 34 MB) | selector min_bytes | 2.84 | 8% | 0.6 | brotli: 7, zstd: 1 |
+| text (8, 34 MB) | selector min_latency | 2.84 | 8% | 0.6 | brotli: 7, zstd: 1 |
+
+Round-trip mismatches: 0
+
+##### LAN (1 ms, 1 Gbit)
+
+| payloads | strategy | wire MB | % of raw | total latency (s) | selector choices |
+|---|---|---|---|---|---|
+| image (24, 27 MB) | raw | 27.36 | 100% | 0.4 |  |
+| image (24, 27 MB) | gzip | 27.27 | 100% | 0.9 |  |
+| image (24, 27 MB) | zstd | 27.30 | 100% | 0.4 |  |
+| image (24, 27 MB) | brotli | 27.30 | 100% | 0.5 |  |
+| image (24, 27 MB) | selector min_bytes | 27.28 | 100% | 0.7 | brotli: 2, gzip: 9, raw: 13 |
+| image (24, 27 MB) | selector min_latency | 27.28 | 100% | 0.7 | brotli: 2, gzip: 9, raw: 13 |
+| audio (14, 37 MB) | raw | 36.98 | 100% | 0.4 |  |
+| audio (14, 37 MB) | gzip | 30.85 | 83% | 1.5 |  |
+| audio (14, 37 MB) | zstd | 31.05 | 84% | 0.5 |  |
+| audio (14, 37 MB) | brotli | 30.42 | 82% | 0.8 |  |
+| audio (14, 37 MB) | selector min_bytes | 30.42 | 82% | 2.0 | brotli: 14 |
+| audio (14, 37 MB) | selector min_latency | 30.42 | 82% | 2.0 | brotli: 14 |
+| text (8, 34 MB) | raw | 34.40 | 100% | 0.3 |  |
+| text (8, 34 MB) | gzip | 3.76 | 11% | 0.5 |  |
+| text (8, 34 MB) | zstd | 2.97 | 9% | 0.1 |  |
+| text (8, 34 MB) | brotli | 2.84 | 8% | 0.3 |  |
+| text (8, 34 MB) | selector min_bytes | 2.84 | 8% | 0.7 | brotli: 7, zstd: 1 |
+| text (8, 34 MB) | selector min_latency | 2.84 | 8% | 0.7 | brotli: 7, zstd: 1 |
+
+Round-trip mismatches: 0
+
+##### WAN (40 ms, 50 Mbit)
+
+| payloads | strategy | wire MB | % of raw | total latency (s) | selector choices |
+|---|---|---|---|---|---|
+| image (24, 27 MB) | raw | 27.36 | 100% | 9.0 |  |
+| image (24, 27 MB) | gzip | 27.27 | 100% | 9.5 |  |
+| image (24, 27 MB) | zstd | 27.30 | 100% | 8.8 |  |
+| image (24, 27 MB) | brotli | 27.30 | 100% | 9.0 |  |
+| image (24, 27 MB) | selector min_bytes | 27.28 | 100% | 9.3 | brotli: 2, gzip: 9, raw: 13 |
+| image (24, 27 MB) | selector min_latency | 27.28 | 100% | 9.2 | brotli: 2, gzip: 9, raw: 13 |
+| audio (14, 37 MB) | raw | 36.98 | 100% | 8.4 |  |
+| audio (14, 37 MB) | gzip | 30.85 | 83% | 8.9 |  |
+| audio (14, 37 MB) | zstd | 31.05 | 84% | 7.8 |  |
+| audio (14, 37 MB) | brotli | 30.42 | 82% | 8.3 |  |
+| audio (14, 37 MB) | selector min_bytes | 30.42 | 82% | 9.4 | brotli: 14 |
+| audio (14, 37 MB) | selector min_latency | 30.42 | 82% | 9.4 | brotli: 14 |
+| text (8, 34 MB) | raw | 34.40 | 100% | 6.9 |  |
+| text (8, 34 MB) | gzip | 3.76 | 11% | 2.6 |  |
+| text (8, 34 MB) | zstd | 2.97 | 9% | 2.0 |  |
+| text (8, 34 MB) | brotli | 2.84 | 8% | 2.2 |  |
+| text (8, 34 MB) | selector min_bytes | 2.84 | 8% | 2.6 | brotli: 7, zstd: 1 |
+| text (8, 34 MB) | selector min_latency | 2.84 | 8% | 2.6 | brotli: 7, zstd: 1 |
+
+Round-trip mismatches: 0
+
+##### Cellular (80 ms, 10 Mbit, 0.1% loss)
+
+| payloads | strategy | wire MB | % of raw | total latency (s) | selector choices |
+|---|---|---|---|---|---|
+| image (24, 27 MB) | raw | 27.36 | 100% | 30.8 |  |
+| image (24, 27 MB) | gzip | 27.27 | 100% | 31.3 |  |
+| image (24, 27 MB) | zstd | 27.30 | 100% | 30.4 |  |
+| image (24, 27 MB) | brotli | 27.30 | 100% | 30.6 |  |
+| image (24, 27 MB) | selector min_bytes | 27.28 | 100% | 31.0 | brotli: 2, gzip: 9, raw: 13 |
+| image (24, 27 MB) | selector min_latency | 27.28 | 100% | 31.0 | brotli: 2, gzip: 9, raw: 13 |
+| audio (14, 37 MB) | raw | 36.98 | 100% | 34.6 |  |
+| audio (14, 37 MB) | gzip | 30.85 | 83% | 31.1 |  |
+| audio (14, 37 MB) | zstd | 31.05 | 84% | 30.5 |  |
+| audio (14, 37 MB) | brotli | 30.42 | 82% | 30.4 |  |
+| audio (14, 37 MB) | selector min_bytes | 30.42 | 82% | 31.5 | brotli: 14 |
+| audio (14, 37 MB) | selector min_latency | 30.42 | 82% | 31.4 | brotli: 14 |
+| text (8, 34 MB) | raw | 34.40 | 100% | 30.5 |  |
+| text (8, 34 MB) | gzip | 3.76 | 11% | 6.7 |  |
+| text (8, 34 MB) | zstd | 2.97 | 9% | 5.2 |  |
+| text (8, 34 MB) | brotli | 2.84 | 8% | 5.3 |  |
+| text (8, 34 MB) | selector min_bytes | 2.84 | 8% | 5.9 | brotli: 7, zstd: 1 |
+| text (8, 34 MB) | selector min_latency | 2.84 | 8% | 5.7 | brotli: 7, zstd: 1 |
+
+Round-trip mismatches: 0
+
+##### BadWifi (30 ms, 5 Mbit, 1% loss)
+
+| payloads | strategy | wire MB | % of raw | total latency (s) | selector choices |
+|---|---|---|---|---|---|
+| image (24, 27 MB) | raw | 27.36 | 100% | 47.7 |  |
+| image (24, 27 MB) | gzip | 27.27 | 100% | 48.2 |  |
+| image (24, 27 MB) | zstd | 27.30 | 100% | 47.6 |  |
+| image (24, 27 MB) | brotli | 27.30 | 100% | 47.7 |  |
+| image (24, 27 MB) | selector min_bytes | 27.28 | 100% | 48.0 | brotli: 2, gzip: 9, raw: 13 |
+| image (24, 27 MB) | selector min_latency | 27.28 | 100% | 47.8 | brotli: 2, gzip: 9, raw: 13 |
+| audio (14, 37 MB) | raw | 36.98 | 100% | 61.4 |  |
+| audio (14, 37 MB) | gzip | 30.85 | 83% | 53.4 |  |
+| audio (14, 37 MB) | zstd | 31.05 | 84% | 52.4 |  |
+| audio (14, 37 MB) | brotli | 30.42 | 82% | 51.8 |  |
+| audio (14, 37 MB) | selector min_bytes | 30.42 | 82% | 52.9 | brotli: 14 |
+| audio (14, 37 MB) | selector min_latency | 30.42 | 82% | 53.2 | brotli: 14 |
+| text (8, 34 MB) | raw | 34.40 | 100% | 56.6 |  |
+| text (8, 34 MB) | gzip | 3.76 | 11% | 8.0 |  |
+| text (8, 34 MB) | zstd | 2.97 | 9% | 6.0 |  |
+| text (8, 34 MB) | brotli | 2.84 | 8% | 6.1 |  |
+| text (8, 34 MB) | selector min_bytes | 2.84 | 8% | 6.4 | brotli: 7, zstd: 1 |
+| text (8, 34 MB) | selector min_latency | 2.84 | 8% | 6.4 | brotli: 7, zstd: 1 |
+
+Round-trip mismatches: 0
+
+### 9. Replication (two runs of the Python server on BIRD dev)
 
 Run 1 used a server file that was missing five global definitions (hints cache, hint store, MAB state path; restored
 afterwards, found by a regression test). None are used when results are registered through `/materialized` or
@@ -281,6 +525,10 @@ summed over the same queries. This is the only measure of run-to-run variation i
   derived ids now share the source's cache and release it when the source is evicted from the LRU.
 - **Java gaps found:** it fails on duplicate column names (BIRD 900 and 901), ignores the `data_driven` Parquet strategy
   (identical bytes under both settings), and its Parquet files are larger than Python's.
+- **Images** (212 M3-Bench PNGs): lossless WebP is 70% of the source PNG bytes; lossy WebP q80 is 10% (median PSNR 36.9 dB) and AVIF q60 is 7% (36.5 dB). PSNR only measures pixel change; whether a model still answers correctly was not measured.
+- **Speech** (14 synthesized clips): FLAC is 36% of the 44.1 kHz WAV, 16 kHz mono WAV alone is 36%, and Opus at 24 kbit/s is 3%. Recognition accuracy was not measured.
+- **Text and JSON** (8 payloads, 34 MB): gzip sends 11% of the raw bytes, zstd 9%, brotli 8%.
+- **Selector on unstructured payloads:** its total latency is within 15% of the best fixed arm in 7 of 15 kind and network combinations. The rest are slower: audio, localhost 21.7x; text, localhost 10.5x; audio, lan 4.9x; text, lan 4.9x; image, localhost 4.1x; image, lan 1.5x; text, wan 1.3x; audio, wan 1.2x. It picks the smallest arm by size and does not model compression time, so where bytes are cheap (localhost, LAN) the size hints and the extra compression cost more than they save.
 - The TPC-DS table shows Python's Arrow IPC output is larger than Java's on wide tables; the cause was not investigated.
 
 ## Limitations
@@ -296,8 +544,11 @@ summed over the same queries. This is the only measure of run-to-run variation i
 - Zero-row results are rejected by the server and are excluded (Spider: see section 2).
 - Security was neither audited nor changed. Reading the Java server's code showed a single shared bearer key (when set),
   no result expiry and wide-open CORS; the Python server was not reviewed for these. Nothing here measures them.
-- Not done: the bandit (`use_mab`) was not run, no LLM accuracy or token measurement, no multimodal
-  payloads.
+- The zstd and brotli arms, the tiny-text rule and the already-compressed check exist only in the Python server; the Java
+  server has no equivalents, so section 8 has no Java comparison.
+- The image set is M3-Bench's task inputs, not tool-returned images; the speech is synthetic; PDFs and video are not covered.
+  Lossy arms were not tested for effect on model answers.
+- Not done: the bandit (`use_mab`) was not run, no LLM accuracy or token measurement.
 
 ## Reproduce
 
@@ -307,6 +558,9 @@ summed over the same queries. This is the only measure of run-to-run variation i
 #   Spider:   spider_data.zip (206 MB) from https://yale-lily.github.io/spider ; unzip to data/spider_data,
 #             then: mkdir data/spider_root && ln -s ../spider_data/database data/spider_root/dev_databases
 #   TPC-DS:   python -m benchmarks.datasets.tpcds   (needs duckdb; writes data/tpcds_catalog_sales_sf1.parquet)
+#   M3-Bench images: the images/ folder of https://huggingface.co/datasets/EtaYang10th/Open-M3-Bench (350 MB, 212 PNGs),
+#             saved to data/m3bench/images
+#   Speech:   python -m benchmarks.datasets.speech   (macOS `say` plus ffmpeg; writes data/audio)
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cd python-server && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && cd ..
 benchmarks/scripts/run_all.sh                 # every measurement above, then rebuilds this report (hours)
@@ -333,5 +587,9 @@ https://dl.acm.org/doi/10.5555/1182635.1164217
 [4] Transaction Processing Performance Council. "TPC-DS Benchmark Specification."
 https://www.tpc.org/tpc_documents_current_versions/current_specifications5.asp
 
-[5] S. Mukkera, C. Liu. "TransForm: Dynamic Format Selection for MCP Tool Outputs in Agentic Data Systems." VLDB 2026
+[5] Y. Zhou, M. Zhao, Z. Wang, D. Gu, B. Guo, R. Ye, L. Han, C. Jin, D. N. Metaxas. "M3-Bench: Multi-Modal, Multi-Hop,
+Multi-Threaded Tool-Using MLLM Agent Benchmark." arXiv:2511.17729, 2025. https://arxiv.org/abs/2511.17729
+(images: https://huggingface.co/datasets/EtaYang10th/Open-M3-Bench; code: https://github.com/EtaYang10th/Open-M3-Bench, MIT)
+
+[6] S. Mukkera, C. Liu. "TransForm: Dynamic Format Selection for MCP Tool Outputs in Agentic Data Systems." VLDB 2026
 Workshop: NOVAS (source: `novas-workshop/main.tex`; the baseline this work reproduces).
