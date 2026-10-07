@@ -37,6 +37,28 @@ MCP endpoint: `http://localhost:8000/mcp/mcp`. The client and sweep scripts are 
 | `TRANSFORM_SCRATCH_DIR` | the source folder | where generated files go (`data/materialized/`, `results/`); the benchmark scripts use `results/scratch/` |
 | `MCP_API_KEY` | unset | when set, every request needs `Authorization: Bearer <key>` |
 
+## Unstructured payload arms
+
+Results registered with `POST /materialized-raw` (images, audio, text, any bytes) are served by five arms, and
+`large_result_auto` picks one from the exact sizes (`describe_result_formats` shows them):
+
+| Arm | Route | Notes |
+|---|---|---|
+| `text_inline` | none (in the tool result) | text up to 256 KB; for the min_bytes and min_latency targets, texts under 4 KB stay inline |
+| `raw_blob` | `/raw/{id}` | as uploaded |
+| `gzip_blob` | `/raw-gzip/{id}` | sent with `Content-Encoding: gzip`, so HTTP clients decode it themselves |
+| `zstd_blob` | `/raw-zstd/{id}` | zstd level 3 |
+| `brotli_blob` | `/raw-brotli/{id}` | brotli level 5 |
+
+The zstd and brotli arms carry no `Content-Encoding` header. The response sets `X-Payload-Codec`,
+`X-Uncompressed-Bytes` and `X-Original-Content-Type`, and the `large_result_auto` descriptor repeats the codec and the
+uncompressed size. A client decompresses with the codec and the size, for example
+`pyarrow.Codec("zstd").decompress(body, decompressed_size=n)`.
+
+Payloads over 1 MB are sampled first: if the first 256 KB barely compresses (PNG, JPEG, Opus, zip), the codec arms are
+left out of the hints and `raw_blob` wins, instead of compressing something that will not shrink. These arms exist only
+in the Python server; the Java server has `text_inline`, `raw_blob` and `gzip_blob` only.
+
 ## Known limitations
 
 - A query that returns zero rows is rejected ("Empty result"); there is nothing to transport.

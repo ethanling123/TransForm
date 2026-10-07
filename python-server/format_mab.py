@@ -37,6 +37,8 @@ FORMATS: tuple[FormatName, ...] = (
     "text_inline",
     "raw_blob",
     "gzip_blob",
+    "zstd_blob",
+    "brotli_blob",
 )
 
 

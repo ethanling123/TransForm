@@ -25,7 +25,7 @@ import re
 import time
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -102,6 +102,8 @@ class ResultConfig:
     raw_mime_type: str | None = None
     raw_charset: str | None = None
     raw_gzip_path: Path | None = None
+    # Compressed copies for the zstd/brotli arms, keyed by arm name (shared with derived configs).
+    raw_codec_paths: Dict[str, Path] = field(default_factory=dict)
     # Pre-computed describe hints, populated at registration time so
     # describe_result_formats / large_result_auto are O(1) dict lookup
     # for the common (default codec, default rows_per_chunk) tuple.
@@ -1789,12 +1791,10 @@ def describe_result_formats(
         if cfg is not None and cfg.payload_kind == "unstructured":
             if cfg.raw_path is None or not cfg.raw_path.is_file():
                 raise ValueError(f"Unstructured result_id missing file: {result_id}")
-            raw_bytes = cfg.raw_path.stat().st_size
-            gzip_bytes = None
-            gz_path = cfg.raw_gzip_path
-            if gz_path is not None and gz_path.is_file():
-                gzip_bytes = gz_path.stat().st_size
-            inline_bytes = raw_bytes if raw_bytes <= MAX_INLINE_TEXT_BYTES else None
+            unstructured = _unstructured_hints(cfg, result_id)
+            raw_bytes = unstructured["raw_bytes"]
+            gzip_bytes = unstructured["gzip_bytes"]
+            inline_bytes = unstructured["text_inline_bytes"]
             if optimization_target:
                 try:
                     sel_target = OptimizationTarget(optimization_target.strip().lower())
@@ -1802,11 +1802,7 @@ def describe_result_formats(
                     sel_target = get_default_target()
             else:
                 sel_target = get_default_target()
-            hints_for_select: Dict[str, Any] = {
-                "raw_bytes": int(raw_bytes),
-                "gzip_bytes": int(gzip_bytes) if gzip_bytes is not None else None,
-                "text_inline_bytes": int(inline_bytes) if inline_bytes is not None else None,
-            }
+            hints_for_select: Dict[str, Any] = unstructured
             sel_ctx = SelectionContext(n_rows=0, n_cols=0, target=sel_target, prefer_streaming=prefer_streaming)
             recommended = select_format_with_hints(sel_ctx, hints_for_select)
             structured = {
@@ -1817,11 +1813,13 @@ def describe_result_formats(
                 "formats": {
                     "raw_blob": {"supported": True, "approx_bytes": int(raw_bytes)},
                     "gzip_blob": {"supported": True, "approx_bytes": int(gzip_bytes) if gzip_bytes is not None else None},
+                    "zstd_blob": {"supported": True, "approx_bytes": unstructured["zstd_bytes"]},
+                    "brotli_blob": {"supported": True, "approx_bytes": unstructured["brotli_bytes"]},
                     "text_inline": {"supported": inline_bytes is not None, "approx_bytes": int(inline_bytes) if inline_bytes is not None else None},
                 },
             }
             return CallToolResult(
-                content=[TextContent(type="text", text=f"Unstructured hints: raw={raw_bytes} B, gzip={gzip_bytes} B; recommended_format={recommended}")],
+                content=[TextContent(type="text", text=f"Unstructured hints: raw={raw_bytes} B, gzip={gzip_bytes} B, zstd={unstructured['zstd_bytes']} B, brotli={unstructured['brotli_bytes']} B; recommended_format={recommended}")],
                 structured_content=structured,
             )
 
@@ -1963,9 +1961,7 @@ def large_result_auto(
         if cfg is not None and cfg.payload_kind == "unstructured":
             if cfg.raw_path is None or not cfg.raw_path.is_file():
                 raise ValueError(f"Unstructured result_id missing file: {result_id}")
-            raw_bytes = cfg.raw_path.stat().st_size
-            gzip_bytes = cfg.raw_gzip_path.stat().st_size if (cfg.raw_gzip_path and cfg.raw_gzip_path.is_file()) else None
-            inline_bytes = raw_bytes if raw_bytes <= MAX_INLINE_TEXT_BYTES else None
+            unstructured = _unstructured_hints(cfg, result_id)
 
             if optimization_target:
                 try:
@@ -1975,11 +1971,7 @@ def large_result_auto(
             else:
                 sel_target = get_default_target()
             sel_ctx = SelectionContext(n_rows=0, n_cols=0, target=sel_target, prefer_streaming=prefer_streaming)
-            hints: Dict[str, Any] = {
-                "raw_bytes": int(raw_bytes),
-                "gzip_bytes": int(gzip_bytes) if gzip_bytes is not None else None,
-                "text_inline_bytes": int(inline_bytes) if inline_bytes is not None else None,
-            }
+            hints: Dict[str, Any] = unstructured
             mab_state = load_mab_state(_SERVER_MAB_STATE_PATH) if use_mab else None
             chosen = select_format_with_mab(sel_ctx, hints, mab_state) if use_mab else select_format_with_hints(sel_ctx, hints)
 
@@ -2007,6 +1999,40 @@ def large_result_auto(
                         content=[TextContent(type="text", text="Returning inline text payload (text_inline).")],
                         structured_content=structured,
                     )
+
+            if chosen in RAW_BYTE_CODECS:
+                codec, _, route, _ = RAW_BYTE_CODECS[chosen]
+                new_id = str(uuid.uuid4())
+                RESULT_REGISTRY[new_id] = ResultConfig(
+                    n_rows=0,
+                    n_cols=0,
+                    payload_kind="unstructured",
+                    raw_path=cfg.raw_path,
+                    raw_mime_type=cfg.raw_mime_type,
+                    raw_charset=cfg.raw_charset,
+                    raw_gzip_path=cfg.raw_gzip_path,
+                    raw_codec_paths=cfg.raw_codec_paths,
+                )
+                url = f"http://localhost:8000/{route}/{new_id}"
+                mime = cfg.raw_mime_type or "application/octet-stream"
+                structured = {
+                    "payload_kind": "unstructured",
+                    "chosen_format": chosen,
+                    "optimization_target": sel_target.value,
+                    "payload": {"kind": "descriptor", "mode": chosen, "id": new_id, "url": url, "mime_type": mime},
+                    "decode": {
+                        "encoding": "raw_bytes",
+                        "transport": "http_blob",
+                        "url": url,
+                        "mime_type": mime,
+                        "codec": codec,
+                        "uncompressed_bytes": int(unstructured["raw_bytes"]),
+                    },
+                }
+                return CallToolResult(
+                    content=[TextContent(type="text", text=f"Returning {codec} blob descriptor ({chosen}): {url}")],
+                    structured_content=structured,
+                )
 
             if chosen == "gzip_blob":
                 new_id = str(uuid.uuid4())
@@ -2851,6 +2877,71 @@ async def raw_blob_endpoint(request) -> Response:
     )
 
 
+# ----- Unstructured payload codecs ------------------------------------------------
+# Byte-codec blob arms next to gzip_blob. They carry no Content-Encoding header so a client without brotli/zstd
+# libraries is not surprised by automatic decoding; the codec and uncompressed size travel in headers/descriptor.
+# arm -> (pyarrow codec, level, route, hint key)
+RAW_BYTE_CODECS: Dict[str, Tuple[str, int, str, str]] = {
+    "zstd_blob": ("zstd", 3, "raw-zstd", "zstd_bytes"),
+    "brotli_blob": ("brotli", 5, "raw-brotli", "brotli_bytes"),
+}
+_SAMPLE_CHECK_ABOVE = 1024 * 1024  # payloads larger than this are sampled before compressing
+_SAMPLE_BYTES = 256 * 1024
+_INCOMPRESSIBLE_RATIO = 0.97  # a sample that compresses less than this is treated as already compressed
+
+
+def _compress_raw(data: bytes, codec: str, level: Optional[int]) -> bytes:
+    return pa.Codec(codec, compression_level=level).compress(data, asbytes=True)
+
+
+def _raw_gzip_blob(cfg: "ResultConfig", result_id: str) -> bytes:
+    if cfg.raw_gzip_path is None or not cfg.raw_gzip_path.is_file():
+        MATERIALIZED_RAW_DIR.mkdir(parents=True, exist_ok=True)
+        gz_path = MATERIALIZED_RAW_DIR / f"{result_id}.bin.gz"
+        gz_path.write_bytes(gzip.compress(cfg.raw_path.read_bytes()))
+        cfg.raw_gzip_path = gz_path
+    return cfg.raw_gzip_path.read_bytes()
+
+
+def _raw_codec_blob(cfg: "ResultConfig", result_id: str, arm: str) -> bytes:
+    """Compressed payload for a byte-codec arm, cached on disk beside the raw file."""
+    codec, level, _, _ = RAW_BYTE_CODECS[arm]
+    path = cfg.raw_codec_paths.get(arm)
+    if path is None or not path.is_file():
+        MATERIALIZED_RAW_DIR.mkdir(parents=True, exist_ok=True)
+        path = MATERIALIZED_RAW_DIR / f"{result_id}.{codec}"
+        path.write_bytes(_compress_raw(cfg.raw_path.read_bytes(), codec, level))
+        cfg.raw_codec_paths[arm] = path
+    return path.read_bytes()
+
+
+def _unstructured_hints(cfg: "ResultConfig", result_id: str) -> Dict[str, Any]:
+    """Size of every unstructured arm, for the selector.
+
+    Compressed sizes are exact. For payloads over 1 MB the first 256 KB is compressed first; if it barely
+    shrinks (images, audio and other already-compressed media) the codec arms are left out so raw wins,
+    instead of spending seconds compressing something that will not get smaller.
+    """
+    raw_bytes = cfg.raw_path.stat().st_size
+    hints: Dict[str, Any] = {
+        "raw_bytes": int(raw_bytes),
+        "gzip_bytes": None,
+        "zstd_bytes": None,
+        "brotli_bytes": None,
+        "text_inline_bytes": int(raw_bytes) if raw_bytes <= MAX_INLINE_TEXT_BYTES else None,
+        "already_compressed": False,
+    }
+    if raw_bytes > _SAMPLE_CHECK_ABOVE:
+        sample = cfg.raw_path.read_bytes()[:_SAMPLE_BYTES]
+        if len(_compress_raw(sample, "zstd", 1)) > _INCOMPRESSIBLE_RATIO * len(sample):
+            hints["already_compressed"] = True
+            return hints
+    hints["gzip_bytes"] = len(_raw_gzip_blob(cfg, result_id))
+    for arm, (_, _, _, key) in RAW_BYTE_CODECS.items():
+        hints[key] = len(_raw_codec_blob(cfg, result_id, arm))
+    return hints
+
+
 async def raw_gzip_blob_endpoint(request) -> Response:
     """Return gzip-compressed raw bytes for an unstructured result."""
     result_id: str = request.path_params["result_id"]
@@ -2863,18 +2954,43 @@ async def raw_gzip_blob_endpoint(request) -> Response:
             media_type="application/json",
             status_code=400,
         )
-    if config.raw_gzip_path is None or not config.raw_gzip_path.is_file():
-        gz_path = MATERIALIZED_RAW_DIR / f"{result_id}.bin.gz"
-        data = config.raw_path.read_bytes()
-        gz_path.write_bytes(gzip.compress(data))
-        config.raw_gzip_path = gz_path
-    gz = config.raw_gzip_path.read_bytes()
+    gz = _raw_gzip_blob(config, result_id)
     headers = {"X-Benchmark-Bytes": str(len(gz)), "Content-Encoding": "gzip"}
     return Response(
         content=gz,
         media_type=config.raw_mime_type or "application/octet-stream",
         headers=headers,
     )
+
+
+def _raw_codec_endpoint(arm: str):
+    """Endpoint factory for the zstd/brotli blob arms."""
+    codec = RAW_BYTE_CODECS[arm][0]
+
+    async def endpoint(request) -> Response:
+        result_id: str = request.path_params["result_id"]
+        config = _get_config_or_404(result_id)
+        if isinstance(config, Response):
+            return config
+        if config.payload_kind != "unstructured" or config.raw_path is None:
+            return Response(
+                content=json.dumps({"error": "result_id is not unstructured"}),
+                media_type="application/json",
+                status_code=400,
+            )
+        blob = _raw_codec_blob(config, result_id, arm)
+        return Response(
+            content=blob,
+            media_type="application/octet-stream",
+            headers={
+                "X-Benchmark-Bytes": str(len(blob)),
+                "X-Payload-Codec": codec,
+                "X-Uncompressed-Bytes": str(config.raw_path.stat().st_size),
+                "X-Original-Content-Type": config.raw_mime_type or "application/octet-stream",
+            },
+        )
+
+    return endpoint
 
 
 # ----- Materialized result registration (HTTP POST) --------------------------------
@@ -3191,6 +3307,8 @@ app = Starlette(
         Route("/materialized-raw", register_materialized_raw_endpoint, methods=["POST"]),
         Route("/raw/{result_id}", raw_blob_endpoint, methods=["GET"]),
         Route("/raw-gzip/{result_id}", raw_gzip_blob_endpoint, methods=["GET"]),
+        Route("/raw-zstd/{result_id}", _raw_codec_endpoint("zstd_blob"), methods=["GET"]),
+        Route("/raw-brotli/{result_id}", _raw_codec_endpoint("brotli_blob"), methods=["GET"]),
     ],
     middleware=_middleware,
     lifespan=lifespan,

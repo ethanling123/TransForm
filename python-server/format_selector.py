@@ -33,6 +33,8 @@ FormatName = Literal[
     "text_inline",
     "raw_blob",
     "gzip_blob",
+    "zstd_blob",
+    "brotli_blob",
 ]
 
 # Hints from describe_result_formats: json_bytes, parquet_bytes, optional stream first chunks, IPC
@@ -246,18 +248,32 @@ def select_format_with_hints(context: SelectionContext, hints: HintsDict) -> For
             # Can't do much without raw_bytes; fall back to json/parquet ladder.
             return select_format(context)
         raw_bytes = int(raw_b)
-        gzip_b = hints.get("gzip_bytes")
-        gzip_bytes = int(gzip_b) if gzip_b is not None else None
-        inline_b = hints.get("text_inline_bytes")
-        inline_bytes = int(inline_b) if inline_b is not None else None
+        # Like the JSON short-circuit for tables: a tiny text is returned inline, since a descriptor costs a round trip.
+        inline_hint = hints.get("text_inline_bytes")
+        if (
+            context.target in (OptimizationTarget.MIN_LATENCY, OptimizationTarget.MIN_BYTES)
+            and inline_hint is not None
+            and int(inline_hint) <= _json_obvious_winner_bytes()
+        ):
+            return "text_inline"
+        # arm, hint key, tie-break rank: on equal cost prefer inline text, then cheaper decoders, then raw.
+        arms: tuple[tuple[FormatName, str, int], ...] = (
+            ("text_inline", "text_inline_bytes", 0),
+            ("zstd_blob", "zstd_bytes", 1),
+            ("gzip_blob", "gzip_bytes", 2),
+            ("brotli_blob", "brotli_bytes", 3),
+        )
+
+        def pick(cost) -> FormatName:
+            candidates: list[tuple[float, int, FormatName]] = [(cost(raw_bytes), 4, "raw_blob")]
+            for arm, key, rank in arms:
+                size = hints.get(key)
+                if size is not None:
+                    candidates.append((cost(int(size)), rank, arm))
+            return min(candidates, key=lambda t: (t[0], t[1]))[2]
 
         def min_unstructured_bytes() -> FormatName:
-            candidates: list[tuple[int, int, FormatName]] = [(raw_bytes, 2, "raw_blob")]
-            if gzip_bytes is not None:
-                candidates.append((gzip_bytes, 1, "gzip_blob"))
-            if inline_bytes is not None:
-                candidates.append((inline_bytes, 0, "text_inline"))
-            return min(candidates, key=lambda t: (t[0], t[1]))[2]
+            return pick(lambda n: n)
 
         if context.target == OptimizationTarget.MIN_BYTES:
             return min_unstructured_bytes()
@@ -273,14 +289,7 @@ def select_format_with_hints(context: SelectionContext, hints: HintsDict) -> For
                 return float(num_bytes)
             return (num_bytes * 8.0) / (mbps * 1_000_000.0)
 
-        candidates_s: list[tuple[float, int, FormatName]] = [
-            (transfer_seconds(raw_bytes), 2, "raw_blob"),
-        ]
-        if gzip_bytes is not None:
-            candidates_s.append((transfer_seconds(gzip_bytes), 1, "gzip_blob"))
-        if inline_bytes is not None:
-            candidates_s.append((transfer_seconds(inline_bytes), 0, "text_inline"))
-        return min(candidates_s, key=lambda t: (t[0], t[1]))[2]
+        return pick(transfer_seconds)
 
     json_b = hints.get("json_bytes")
     parquet_b = hints.get("parquet_bytes")
