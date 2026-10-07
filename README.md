@@ -9,9 +9,12 @@ Artifact: https://github.com/shashank524/TransForm
 | Path | Description |
 |------|-------------|
 | `novas-workshop/` | Workshop paper (`main.tex`, `ref.bib`, figures) |
+| `python-server/` | Python MCP server (restored from the original implementation; see its README) |
 | `java-server/` | Java (Spring Boot) MCP server with fused format selection |
 | `java-sdk/` | Vendored [MCP Java SDK](https://github.com/modelcontextprotocol/java-sdk) |
-| `client/` | Python MCP client (`pip install mcp`) |
+| `client/` | Python MCP client library (`mcp_client.py`, `llm_client.py`) |
+| `benchmarks/` | Benchmark sweeps, network emulation, analysis, report builder and run scripts (see its README) |
+| `REPORT.md` | Results and benchmark checks for the Python server (BIRD, Spider, TPC-DS, network profiles) |
 
 ## Java server
 
