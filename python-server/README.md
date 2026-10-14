@@ -59,6 +59,21 @@ Payloads over 1 MB are sampled first: if the first 256 KB barely compresses (PNG
 left out of the hints and `raw_blob` wins, instead of compressing something that will not shrink. These arms exist only
 in the Python server; the Java server has `text_inline`, `raw_blob` and `gzip_blob` only.
 
+## Arm registry
+
+Every way of delivering a result is an arm, defined once in [arms.py](arms.py) (`ArmSpec`: modality, container, codec,
+level, transport, `selectable`). The selector and the bandit only see selectable arms; the rest are fetched on request.
+
+- `list_arms` returns the registry. `fetch_arm(arm, result_id)` returns a descriptor for any blob arm.
+- Registered but never chosen by the selector: `parquet_{none,gzip,lz4,zstd1,zstd3,zstd9}_blob`,
+  `arrow_ipc_{lz4,zstd}_blob`.
+- `GET /data/{handle}` serves any minted handle by the arm it was minted for and adds `X-Payload-Codec` and
+  `X-Content-Digest` (sha256). The old routes (`/blobs`, `/ipc-blobs`, `/streams`, `/raw*`) are unchanged.
+- Descriptors keep their old fields and add `format`, `modality`, `mime_type`, `codec`, `data_url`, and `size` and
+  `digest` when the encoded bytes are already in memory.
+- `tests/golden_arm_bytes.json` holds digests of what every existing arm served before the registry; the tests fail if
+  those bytes change.
+
 ## Known limitations
 
 - A query that returns zero rows is rejected ("Empty result"); there is nothing to transport.

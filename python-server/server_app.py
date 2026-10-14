@@ -70,7 +70,8 @@ if str(PYTHON_SDK_SRC) not in sys.path:
 from mcp.server.mcpserver import MCPServer  # type: ignore  # noqa: E402
 from mcp.types import CallToolResult, TextContent  # type: ignore  # noqa: E402
 
-from codec_selector import select_encoding_params  # noqa: E402
+import arms  # noqa: E402
+from arms import REGISTRY  # noqa: E402
 from format_selector import (  # noqa: E402
     OptimizationTarget,
     SelectionContext,
@@ -93,6 +94,7 @@ class ResultConfig:
     n_rows: int
     n_cols: int
     payload_kind: str = "tabular"  # "tabular" | "unstructured"
+    arm: Optional[str] = None  # arm this handle was minted for (see arms.REGISTRY); None for registered results
     rows_per_chunk: int | None = None
     compression: str | None = None
     encoding_strategy: str | None = None
@@ -662,19 +664,7 @@ def _get_default_encoding_strategy() -> str:
 
 def _encode_parquet(table: pa.Table, compression: str, encoding_strategy: str) -> bytes:
     """Encode an Arrow table to Parquet bytes with the given codec and strategy."""
-    buf = BytesIO()
-    write_kwargs: Dict[str, Any] = {"compression": compression}
-
-    if encoding_strategy == "data_driven":
-        params = select_encoding_params(table)
-        dict_cols = params.get("use_dictionary", [])
-        col_enc = params.get("column_encoding")
-        write_kwargs["use_dictionary"] = dict_cols
-        if col_enc:
-            write_kwargs["column_encoding"] = col_enc
-
-    pq.write_table(table, buf, **write_kwargs)
-    return buf.getvalue()
+    return arms.encode_parquet(table, compression, None, encoding_strategy)
 
 
 # ----- Arrow IPC (file format) ----------------------------------------------------
@@ -688,19 +678,9 @@ def _get_default_arrow_ipc_compression() -> str:
     return raw if raw in VALID_ARROW_IPC_COMPRESSIONS else "none"
 
 
-def _ipc_write_options(ipc_compression: str) -> pa.ipc.IpcWriteOptions:
-    if ipc_compression == "none":
-        return pa.ipc.IpcWriteOptions()
-    return pa.ipc.IpcWriteOptions(compression=ipc_compression)
-
-
 def _encode_arrow_ipc_file(table: pa.Table, ipc_compression: str) -> bytes:
     """Encode an Arrow table as IPC file bytes (single file with schema + batches)."""
-    buf = pa.BufferOutputStream()
-    opts = _ipc_write_options(ipc_compression)
-    with pa.ipc.new_file(buf, table.schema, options=opts) as writer:
-        writer.write_table(table)
-    return buf.getvalue().to_pybytes()
+    return arms.encode_arrow_ipc(table, ipc_compression)
 
 
 # ----- Parquet encoding helpers with caching ----------------------------------------
@@ -1545,6 +1525,7 @@ def large_parquet_blob(
         compression=comp,
         encoding_strategy=enc_strat,
         materialized_path=materialized_path,
+        arm="parquet_blob",
     )
     _inherit_caches(new_id, result_id)
 
@@ -1557,6 +1538,7 @@ def large_parquet_blob(
         "compression": comp,
         "encoding_strategy": enc_strat,
     }
+    _add_arm_fields(descriptor, "parquet_blob")
 
     return CallToolResult(
         content=[
@@ -1610,6 +1592,7 @@ def large_parquet_stream(
         compression=comp,
         encoding_strategy=enc_strat,
         materialized_path=materialized_path,
+        arm="parquet_stream",
     )
     _inherit_caches(new_id, result_id)
 
@@ -1623,6 +1606,7 @@ def large_parquet_stream(
         "compression": comp,
         "encoding_strategy": enc_strat,
     }
+    _add_arm_fields(descriptor, "parquet_stream")
 
     return CallToolResult(
         content=[
@@ -1673,6 +1657,7 @@ def large_arrow_ipc_blob(
         n_cols=n_cols,
         ipc_compression=ipc_comp,
         materialized_path=materialized_path,
+        arm="arrow_ipc_blob",
     )
     _inherit_caches(new_id, result_id)
 
@@ -1684,6 +1669,7 @@ def large_arrow_ipc_blob(
         "n_cols": n_cols,
         "ipc_compression": ipc_comp,
     }
+    _add_arm_fields(descriptor, "arrow_ipc_blob")
 
     return CallToolResult(
         content=[
@@ -1737,6 +1723,7 @@ def large_arrow_ipc_stream(
         rows_per_chunk=rows_per_chunk,
         ipc_compression=ipc_comp,
         materialized_path=materialized_path,
+        arm="arrow_ipc_stream",
     )
     _inherit_caches(new_id, result_id)
 
@@ -1749,6 +1736,7 @@ def large_arrow_ipc_stream(
         "rows_per_chunk": rows_per_chunk,
         "ipc_compression": ipc_comp,
     }
+    _add_arm_fields(descriptor, "arrow_ipc_stream")
 
     return CallToolResult(
         content=[
@@ -2012,6 +2000,7 @@ def large_result_auto(
                     raw_charset=cfg.raw_charset,
                     raw_gzip_path=cfg.raw_gzip_path,
                     raw_codec_paths=cfg.raw_codec_paths,
+                    arm=chosen,
                 )
                 url = f"http://localhost:8000/{route}/{new_id}"
                 mime = cfg.raw_mime_type or "application/octet-stream"
@@ -2019,7 +2008,7 @@ def large_result_auto(
                     "payload_kind": "unstructured",
                     "chosen_format": chosen,
                     "optimization_target": sel_target.value,
-                    "payload": {"kind": "descriptor", "mode": chosen, "id": new_id, "url": url, "mime_type": mime},
+                    "payload": _add_arm_fields({"kind": "descriptor", "mode": chosen, "id": new_id, "url": url, "mime_type": mime}, chosen),
                     "decode": {
                         "encoding": "raw_bytes",
                         "transport": "http_blob",
@@ -2044,6 +2033,7 @@ def large_result_auto(
                     raw_mime_type=cfg.raw_mime_type,
                     raw_charset=cfg.raw_charset,
                     raw_gzip_path=cfg.raw_gzip_path,
+                    arm="gzip_blob",
                 )
                 descriptor = {
                     "mode": "gzip_blob",
@@ -2055,7 +2045,7 @@ def large_result_auto(
                     "payload_kind": "unstructured",
                     "chosen_format": "gzip_blob",
                     "optimization_target": sel_target.value,
-                    "payload": {"kind": "descriptor", **descriptor},
+                    "payload": _add_arm_fields({"kind": "descriptor", **descriptor}, "gzip_blob"),
                     "decode": {
                         "encoding": "raw_bytes",
                         "transport": "http_blob",
@@ -2079,6 +2069,7 @@ def large_result_auto(
                 raw_mime_type=cfg.raw_mime_type,
                 raw_charset=cfg.raw_charset,
                 raw_gzip_path=cfg.raw_gzip_path,
+                arm="raw_blob",
             )
             descriptor = {
                 "mode": "raw_blob",
@@ -2090,7 +2081,7 @@ def large_result_auto(
                 "payload_kind": "unstructured",
                 "chosen_format": "raw_blob",
                 "optimization_target": sel_target.value,
-                "payload": {"kind": "descriptor", **descriptor},
+                "payload": _add_arm_fields({"kind": "descriptor", **descriptor}, "raw_blob"),
                 "decode": {
                     "encoding": "raw_bytes",
                     "transport": "http_blob",
@@ -2993,6 +2984,164 @@ def _raw_codec_endpoint(arm: str):
     return endpoint
 
 
+# ----- Arm registry surface: descriptor fields, GET /data/{handle}, fetch_arm, list_arms --------
+
+
+def _arm_codec(spec: "arms.ArmSpec", cfg: ResultConfig) -> Optional[str]:
+    """Codec a handle's bytes are encoded with; arms that follow the process default read it from the config."""
+    if spec.codec is not None:
+        return spec.codec
+    if spec.container == "parquet":
+        return cfg.compression or _get_default_compression()
+    if spec.container == "arrow_ipc":
+        return cfg.ipc_compression or _get_default_arrow_ipc_compression()
+    return None
+
+
+def _cached_blob(spec: "arms.ArmSpec", cfg: ResultConfig) -> Optional[bytes]:
+    """The encoded bytes for a blob handle if registration already produced them (so no encoding is needed)."""
+    if spec.name == "parquet_blob":
+        key = (cfg.compression or _get_default_compression(), cfg.encoding_strategy or _get_default_encoding_strategy())
+        if cfg.cached_parquet_codec == key:
+            return cfg.cached_parquet_blob_bytes
+    if spec.name == "arrow_ipc_blob" and cfg.cached_arrow_ipc_codec == _arm_codec(spec, cfg):
+        return cfg.cached_arrow_ipc_blob_bytes
+    return None
+
+
+def _add_arm_fields(descriptor: Dict[str, Any], arm: str) -> Dict[str, Any]:
+    """Add the registry fields to a descriptor in place; existing fields are left alone.
+
+    size and digest are included only when the encoded bytes are already in memory, so a tool call never encodes.
+    """
+    spec = REGISTRY.get(arm)
+    cfg = RESULT_REGISTRY[descriptor["id"]]
+    descriptor.setdefault("format", arm)
+    descriptor.setdefault("modality", spec.modality)
+    descriptor.setdefault("mime_type", spec.mime_type)
+    descriptor["codec"] = _arm_codec(spec, cfg)
+    descriptor["data_url"] = f"http://localhost:8000/data/{descriptor['id']}"
+    cached = _cached_blob(spec, cfg)
+    if cached is not None:
+        descriptor["size"] = len(cached)
+        descriptor["digest"] = hashlib.sha256(cached).hexdigest()
+    return descriptor
+
+
+def _serve_table_codec_arm(cfg: ResultConfig, spec: "arms.ArmSpec") -> Response:
+    table = _resolve_arrow_table(cfg)
+    if spec.container == "parquet":
+        data = arms.encode_parquet(table, spec.codec, spec.level, cfg.encoding_strategy or _get_default_encoding_strategy())
+    else:
+        data = arms.encode_arrow_ipc(table, spec.codec)
+    return Response(
+        content=data,
+        media_type=spec.mime_type,
+        headers={"X-Benchmark-Rows": str(cfg.n_rows), "X-Benchmark-Cols": str(cfg.n_cols), "X-Benchmark-Bytes": str(len(data))},
+    )
+
+
+async def data_endpoint(request) -> Response:
+    """One route for every minted handle: dispatch on the arm it was minted for."""
+    handle: str = request.path_params["handle"]
+    cfg = _get_config_or_404(handle)
+    if isinstance(cfg, Response):
+        return cfg
+    if cfg.arm is None or REGISTRY.get(cfg.arm).transport == "inline":
+        return Response(
+            content=json.dumps({"error": "handle was not minted for a fetchable arm; use a tool to get a descriptor"}),
+            media_type="application/json",
+            status_code=400,
+        )
+    spec = REGISTRY.get(cfg.arm)
+    request.scope["path_params"] = {"result_id": handle}
+    legacy = _LEGACY_ENDPOINTS.get(spec.name)
+    response = await legacy(request) if legacy else _serve_table_codec_arm(cfg, spec)
+    if isinstance(response, StreamingResponse):
+        return response
+    response.headers["X-Payload-Codec"] = response.headers.get("X-Payload-Codec") or str(_arm_codec(spec, cfg))
+    response.headers["X-Content-Digest"] = hashlib.sha256(response.body).hexdigest()
+    return response
+
+
+_LEGACY_ENDPOINTS = {
+    "parquet_blob": parquet_blob_endpoint,
+    "parquet_stream": parquet_stream_endpoint,
+    "arrow_ipc_blob": ipc_blob_endpoint,
+    "arrow_ipc_stream": ipc_stream_endpoint,
+    "raw_blob": raw_blob_endpoint,
+    "gzip_blob": raw_gzip_blob_endpoint,
+    "zstd_blob": _raw_codec_endpoint("zstd_blob"),
+    "brotli_blob": _raw_codec_endpoint("brotli_blob"),
+}
+
+
+@mcp.tool()
+def list_arms() -> CallToolResult:
+    """List every registered arm: modality, container, codec, level and whether the selector may choose it."""
+    arm_list = [spec.describe() for spec in REGISTRY.all()]
+    return CallToolResult(
+        content=[TextContent(type="text", text=f"{len(arm_list)} arms registered")],
+        structured_content={"arms": arm_list},
+    )
+
+
+@mcp.tool()
+def fetch_arm(arm: str, result_id: str) -> CallToolResult:
+    """Return a descriptor for *result_id* delivered through a specific blob arm, selectable or not."""
+    try:
+        spec = REGISTRY.get(arm)
+    except KeyError:
+        raise ValueError(f"Unknown arm: {arm}") from None
+    if spec.transport != "blob":
+        raise ValueError(f"{arm} is a {spec.transport} arm; fetch_arm serves blob arms (use the large_* tools for streams)")
+    src = RESULT_REGISTRY.get(result_id)
+    if src is None:
+        raise ValueError(f"Unknown result_id: {result_id}")
+    if (spec.modality == "table") != (src.payload_kind == "tabular"):
+        raise ValueError(f"{arm} is a {spec.modality} arm but {result_id} is {src.payload_kind}")
+    if arm == "parquet_blob":
+        return large_parquet_blob(0, 0, result_id=result_id)
+    if arm == "arrow_ipc_blob":
+        return large_arrow_ipc_blob(0, 0, result_id=result_id)
+
+    new_id = str(uuid.uuid4())
+    if spec.modality == "table":
+        RESULT_REGISTRY[new_id] = ResultConfig(
+            n_rows=src.n_rows,
+            n_cols=src.n_cols,
+            compression=spec.codec if spec.container == "parquet" else None,
+            encoding_strategy=_get_default_encoding_strategy() if spec.container == "parquet" else None,
+            ipc_compression=spec.codec if spec.container == "arrow_ipc" else None,
+            materialized_path=src.materialized_path,
+            arm=arm,
+        )
+        _inherit_caches(new_id, result_id)
+        url = f"http://localhost:8000/data/{new_id}"
+        descriptor: Dict[str, Any] = {"mode": arm, "id": new_id, "url": url, "n_rows": src.n_rows, "n_cols": src.n_cols}
+    else:
+        RESULT_REGISTRY[new_id] = ResultConfig(
+            n_rows=0,
+            n_cols=0,
+            payload_kind="unstructured",
+            raw_path=src.raw_path,
+            raw_mime_type=src.raw_mime_type,
+            raw_charset=src.raw_charset,
+            raw_gzip_path=src.raw_gzip_path,
+            raw_codec_paths=src.raw_codec_paths,
+            arm=arm,
+        )
+        route = {"raw_blob": "raw", "gzip_blob": "raw-gzip", "zstd_blob": "raw-zstd", "brotli_blob": "raw-brotli"}[arm]
+        descriptor = {"mode": arm, "id": new_id, "url": f"http://localhost:8000/{route}/{new_id}",
+                      "mime_type": src.raw_mime_type or "application/octet-stream"}
+    _add_arm_fields(descriptor, arm)
+    return CallToolResult(
+        content=[TextContent(type="text", text=f"{arm} descriptor: {descriptor['data_url']}")],
+        structured_content=descriptor,
+        _meta={"result_id": new_id},
+    )
+
+
 # ----- Materialized result registration (HTTP POST) --------------------------------
 
 
@@ -3303,6 +3452,7 @@ app = Starlette(
         Route("/streams/{result_id}", parquet_stream_endpoint, methods=["GET"]),
         Route("/ipc-blobs/{result_id}.arrow", ipc_blob_endpoint, methods=["GET"]),
         Route("/ipc-streams/{result_id}", ipc_stream_endpoint, methods=["GET"]),
+        Route("/data/{handle}", data_endpoint, methods=["GET"]),
         Route("/materialized", register_materialized_endpoint, methods=["POST"]),
         Route("/materialized-raw", register_materialized_raw_endpoint, methods=["POST"]),
         Route("/raw/{result_id}", raw_blob_endpoint, methods=["GET"]),

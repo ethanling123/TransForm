@@ -18,8 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.chdir(_SCRATCH)
 
 import pyarrow as pa  # noqa: E402
-from starlette.testclient import TestClient  # noqa: E402
 
+import shared  # noqa: E402
 import server_app as S  # noqa: E402
 from format_selector import OptimizationTarget, SelectionContext, select_format_with_hints  # noqa: E402
 
@@ -56,12 +56,7 @@ class SelectorArms(unittest.TestCase):
 class ServerArms(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.client = TestClient(S.app)
-        cls.client.__enter__()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.client.__exit__(None, None, None)
+        cls.client = shared.client(S.app)
 
     def register(self, payload: bytes, content_type="text/plain") -> str:
         response = self.client.post("/materialized-raw", content=payload, headers={"Content-Type": content_type})

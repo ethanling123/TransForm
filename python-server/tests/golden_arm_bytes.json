@@ -1,0 +1,14 @@
+{
+ "arrow_ipc_blob/lz4": "652c8a0319dec7f237d2e39c0dd1a4c8ed0d73d472148e8d884afdb1a452fed4",
+ "arrow_ipc_blob/none": "41cbd66b554cdcb833a6502fe2b6e6afa38ce3b5caf945a9bcc86c21aeb0f3ec",
+ "arrow_ipc_blob/zstd": "63ceff4341d7feffd0fafd783e220dcc31e0ca616ba7e5b2afa3626f9b04e2f3",
+ "arrow_ipc_stream": "5e36783bd91c8c381536a561bafd3c1a25c230f545d69880bc45e7c1f3c8aad3",
+ "gzip_blob/decompressed": "cb7833e6050ba2cbadf5c071817ad4c74c99c6db847bd09f75a5038c2adc34e2",
+ "json": "4b5e8dc8f1d76a5e1928667752f8632a128562baf08fb93337919553864bb782",
+ "parquet_blob/data_driven": "816ba062b18943fec74887131fe0b25cfc4820e902a618f51dd12809e8c2fb83",
+ "parquet_blob/default": "e70b8cfd031bac1bf4ef2396f07e4d3d29cfe94b1d94ff59200b3c43581876ac",
+ "parquet_stream": "bb1b363ff31b7ffb01d990a819d7e74139e940a9c6c43afca0633d871754bfb1",
+ "raw-brotli": "22d18ddc96273a479bd79e4d83d105a05a595911c53dcaee436f83feb0d83235",
+ "raw-zstd": "e57e01c14418b53ac059bbbe42732f8494c0db72b8fec149bae9a4f1ef7e9a38",
+ "raw_blob": "cb7833e6050ba2cbadf5c071817ad4c74c99c6db847bd09f75a5038c2adc34e2"
+}

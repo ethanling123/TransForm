@@ -55,10 +55,12 @@ verify_smoke.py
 # --- Docs / drafts / alternate paper trees ---
 OverleafProject/
 papers/
-docs/
+docs/*
+!docs/superpowers/
 scripts/
 *.md
 !README.md
+!docs/superpowers/**/*.md
 
 # --- Vendored SDK noise (runtime needs src + build metadata only) ---
 java-sdk/conformance-tests/
