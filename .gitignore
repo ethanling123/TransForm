@@ -50,6 +50,7 @@ summarize_*.py
 profile_*.py
 run_workflow.py
 verify_smoke.py
+!benchmarks/paper_harness/*.py
 
 # --- Docs / drafts / alternate paper trees ---
 OverleafProject/
