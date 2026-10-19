@@ -19,6 +19,12 @@ VOICES = ["Samantha", "Daniel", "Karen", "Moira", "Rishi", "Tessa", "Fred"]
 SOURCES = ["README.md", "benchmarks/README.md", "python-server/README.md", "REPORT.md"]
 
 
+def plain_passages():
+    """Everyday prose (benchmarks/datasets/speech_passages.txt): the repo's own documents are full of jargon, numbers
+    and symbols that a speech model transcribes differently from how they were written, which swamps a codec comparison."""
+    return [line.strip() for line in (Path(__file__).with_name("speech_passages.txt")).read_text().splitlines() if line.strip()]
+
+
 def passages(min_words=25, max_words=140):
     """Plain-prose paragraphs from the repo's markdown files, with code and tables removed."""
     out = []
@@ -39,9 +45,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default="data/audio")
     parser.add_argument("--count", type=int, default=14)
+    parser.add_argument("--source", choices=["repo", "plain"], default="repo", help="repo docs or everyday prose")
     args = parser.parse_args()
 
-    chosen = sorted(passages(), key=len)
+    chosen = sorted(plain_passages() if args.source == "plain" else passages(), key=len)
     step = max(1, len(chosen) // args.count)
     chosen = chosen[::step][: args.count]
     out = Path(args.out)
@@ -55,6 +62,7 @@ def main():
             wav = out / f"speech_{i:02d}_{voice.lower()}.wav"
             subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(aiff),
                             "-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le", str(wav)], check=True)
+            wav.with_suffix(".txt").write_text(text)  # the exact script, for word-error-rate checks
             print(f"{wav.name}: {len(text.split())} words, {wav.stat().st_size / 1e6:.2f} MB")
 
 

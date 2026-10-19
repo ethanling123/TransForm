@@ -221,6 +221,52 @@ def netem_speedups():
     return out
 
 
+def shift_headings(text, drop_title=True):
+    """Nest a generated markdown block under a '###' section: drop its '# ' title, push '#'-headings down to '####'."""
+    lines = text.splitlines()
+    if drop_title and lines and lines[0].startswith("# "):
+        lines = lines[1:]
+    return "\n".join("####" + l[l.index(" "):] if l.startswith("#") else l for l in lines).strip()
+
+
+def attacks_section():
+    path = R / "attacks" / "BEFORE.md"
+    if not path.exists():
+        return "not run", ""
+    text = path.read_text()
+    table = text[text.index("| ID |"):text.index("## Evidence")].strip()
+    evidence = text[text.index("### open"):].strip()
+    return table, shift_headings(evidence, drop_title=False)
+
+
+def lossy_facts():
+    """One-line findings computed from the lossy and cost-model outputs."""
+    import statistics as st
+    audio = [r for r in load("lossy/audio_accuracy.csv")]
+    by = {}
+    for r in audio:
+        by.setdefault(r["arm"], []).append(r)
+    base = {r["clip"]: float(r["wer"]) for r in by["original"]}
+    def delta(arm):
+        return 100 * st.mean(float(r["wer"]) - base[r["clip"]] for r in by[arm])
+    def pct(arm):
+        return 100 * st.mean(int(r["bytes"]) / int(r["wav_bytes"]) for r in by[arm])
+    return (f"Opus at 32 kbit/s is {pct('opus-32k'):.1f}% of the WAV size and changes mean word error rate by "
+            f"{delta('opus-32k'):+.2f} points (original: {100 * st.mean(base.values()):.2f}%); Opus at 12 kbit/s is "
+            f"{pct('opus-12k'):.1f}% of the size at {delta('opus-12k'):+.2f} points")
+
+
+def cost_facts():
+    import re
+    text = (R / "payloads" / "cost_model.md").read_text()
+    rows = [l for l in text.split("## Regret")[1].splitlines() if l.startswith("| ") and "x |" in l]
+    cells = [[c.strip() for c in l.strip("| ").split("|")] for l in rows]
+    cost = [float(c[2].rstrip("x")) for c in cells]
+    cur = [(float(c[4].rstrip("x")), c[0], c[1]) for c in cells]
+    worst = max(cur)
+    return max(cost), worst
+
+
 def main():
     matrix = run_module("benchmarks.analysis.matrix").replace("### ", "#### ")
     netem = run_module("benchmarks.analysis.network").replace("### ", "#### ")
