@@ -21,6 +21,7 @@ Rows are appended as they finish and finished (item, arm) pairs are skipped, so 
     .venv/bin/python -m benchmarks.sweeps.lossy audio
     .venv/bin/python -m benchmarks.sweeps.lossy images --limit 30
     .venv/bin/python -m benchmarks.sweeps.lossy documents
+    .venv/bin/python -m benchmarks.sweeps.lossy documents --harsh --fonts 7 9
     .venv/bin/python -m benchmarks.sweeps.lossy audio --snr 10
     VERTEX_API_KEY=... .venv/bin/python -m benchmarks.sweeps.lossy images --backend vertex
 """
@@ -63,6 +64,8 @@ PROMPTS = {
 NOISE_FLOOR_ARM = ("jpeg-q95", "JPEG", {"quality": 95}, None, False)
 RERUN_ARM = ("png-rerun", "PNG", {}, None, True)
 HALF_SIZE_ARM = ("png-0.5x", "PNG", {}, 0.5, False)
+HARSH_ARMS = [("jpeg-q30", "JPEG", {"quality": 30}, None, False), ("webp-q30", "WEBP", {"quality": 30}, None, False),
+              ("avif-q20", "AVIF", {"quality": 20, "speed": 6}, None, False), ("png-0.25x", "PNG", {}, 0.25, False)]
 WER_NORMALIZE = jiwer.Compose([jiwer.ToLowerCase(), jiwer.RemovePunctuation(), jiwer.RemoveMultipleSpaces(), jiwer.Strip(),
                                jiwer.ReduceToListOfListOfWords()])
 
@@ -147,9 +150,13 @@ def png_b64(im: Image.Image) -> str:
 
 
 def ask(client: httpx.Client, image_b64: str, prompt: str) -> str:
-    resp = client.post(f"{OLLAMA}/api/chat", json={
-        "model": VISION_MODEL, "stream": False, "options": {"temperature": 0, "seed": 0, "num_predict": 250},
-        "messages": [{"role": "user", "content": prompt, "images": [image_b64]}]})
+    for attempt in range(4):
+        resp = client.post(f"{OLLAMA}/api/chat", json={
+            "model": VISION_MODEL, "stream": False, "options": {"temperature": 0, "seed": 0, "num_predict": 250},
+            "messages": [{"role": "user", "content": prompt, "images": [image_b64]}]})
+        if resp.status_code != 500:  # Ollama returns 500 now and then while it reloads the model
+            break
+        time.sleep(5 * (attempt + 1))
     resp.raise_for_status()
     return resp.json()["message"]["content"]
 
@@ -268,11 +275,13 @@ def render_document(text: str, font_px: int, width: int = 900) -> tuple[Image.Im
 
 
 def run_documents(args) -> None:
-    out = Path(args.out_dir) / "document_accuracy.csv"
+    out = Path(args.out_dir) / ("document_accuracy_harsh.csv" if args.harsh else "document_accuracy.csv")
     header = ["document", "font_px", "arm", "bytes", "png_bytes", "cer", "wer", "seconds"]
     done = done_keys(out, 3)
     passages = [l.strip() for l in (Path(__file__).parents[1] / "datasets" / "speech_passages.txt").read_text().splitlines() if l.strip()]
     specs = [s for s in [*IMAGE_ARMS, NOISE_FLOOR_ARM, RERUN_ARM, HALF_SIZE_ARM] if s[0] != "png" and s[3] != 1024]
+    if args.harsh:
+        specs = [RERUN_ARM, *HARSH_ARMS]
     with httpx.Client(timeout=600) as client:
         for i in range(len(passages)):
             passage = " ".join(passages[(i + k) % len(passages)] for k in range(3))
@@ -287,7 +296,11 @@ def run_documents(args) -> None:
                         continue
                     t = time.perf_counter()
                     size, decoded = apply_arm(original, original, spec)
-                    answer = ask(client, png_b64(decoded), DOC_PROMPT)
+                    try:
+                        answer = ask(client, png_b64(decoded), DOC_PROMPT)
+                    except httpx.HTTPStatusError:  # the model refuses images below its minimum size (seen at quarter size); skipped, not scored
+                        print(f"{name}@{font_px} {spec[0]}: model rejected a {decoded.size[0]}x{decoded.size[1]} image", flush=True)
+                        continue
                     append(out, header, [name, font_px, spec[0], size, png_bytes, text_error(jiwer.cer, reference, answer),
                                          text_error(jiwer.wer, reference, answer), time.perf_counter() - t])
                 print(f"{name}@{font_px} done", flush=True)
@@ -314,6 +327,7 @@ def main():
     audio.add_argument("--snr", type=float, default=None, help="mix in white noise at this signal-to-noise ratio (dB)")
     documents = sub.add_parser("documents")
     documents.add_argument("--fonts", type=int, nargs="+", default=[11, 14, 18], help="font sizes in pixels")
+    documents.add_argument("--harsh", action="store_true", help="only the harshest settings (JPEG/WebP q30, AVIF q20, quarter size)")
     for p in (audio, images, documents):
         p.add_argument("--out-dir", default="results/lossy")
     args = parser.parse_args()

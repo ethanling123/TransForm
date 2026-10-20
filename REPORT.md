@@ -33,7 +33,8 @@ Each side's tool names and argument schemas are compared by `python -m benchmark
 | TPC-DS | `catalog_sales` at scale factor 1 (1,441,548 rows x 34 columns) generated with DuckDB's `dsdgen`, grid of 10K/100K/500K rows x 6/20/34 columns taken from the original harness | [3], [4] |
 | Synthetic | generated tables from 100 to 500,000 rows, 10 columns | this repo (`benchmarks/sweeps/synthetic.py`) |
 | M3-Bench images | the 212 PNG images from the Open-M3-Bench dataset (350 MB). They are the benchmark's task inputs (photos and screenshots), not tool results | [5] |
-| Synthesized speech | 14 passages from this repo's docs, spoken by 7 macOS `say` voices, 44.1 kHz mono WAV (35 MB). No real recordings | `benchmarks/datasets/speech.py` |
+| Synthesized speech | 14 passages of everyday prose (`benchmarks/datasets/speech_passages.txt`), spoken by 7 macOS `say` voices, 44.1 kHz mono WAV (35 MB). No real recordings | `benchmarks/datasets/speech.py` |
+| Rendered documents | the same 14 passages (three at a time) drawn as white-page images at 7 to 18 px type; the text is the ground truth | `benchmarks/sweeps/lossy.py` |
 
 ## Results
 
@@ -321,40 +322,40 @@ fetched repeatedly. The BIRD results are narrow (1 to 3 columns), so they say li
 ### 7. Images and audio: codec comparison (in-process)
 
 Every image and audio arm measured on the real files, no server. Image fidelity is PSNR against the original (alpha
-flattened onto white); it is a pixel-difference proxy, not task accuracy. Encode times for images ran four at a time, so
-they are inflated; audio times include ffmpeg's start-up (a few tens of ms) and the audio is synthetic speech, which is
-cleaner than field recordings.
+flattened onto white); it is a pixel-difference proxy, not task accuracy (section 10 measures that). Files were encoded one
+at a time, so the timings carry no contention; audio times include ffmpeg's start-up (a few tens of ms) and the audio is
+synthetic speech, which is cleaner than field recordings.
 
 ##### Images: 212 M3-Bench PNGs (350.4 MB)
 
 | arm | total MB | % of source PNG | median encode ms | median decode ms | PSNR dB, median (min) |
 |---|---|---|---|---|---|
-| png | 352.5 | 100.6% | 40 | 12 | lossless |
-| webp-lossless | 245.9 | 70.2% | 308 | 12 | lossless |
-| webp-q90 | 53.9 | 15.4% | 58 | 9 | 40.4 (min 24.8) |
-| webp-q80 | 35.2 | 10.0% | 51 | 7 | 36.9 (min 24.7) |
-| webp-q60 | 24.7 | 7.0% | 47 | 5 | 34.7 (min 24.4) |
-| avif-q80 | 43.8 | 12.5% | 88 | 5 | 40.4 (min 24.7) |
-| avif-q60 | 25.7 | 7.3% | 74 | 4 | 36.4 (min 24.5) |
-| avif-q40 | 12.0 | 3.4% | 56 | 3 | 32.0 (min 23.7) |
-| jpeg-q90 | 67.5 | 19.3% | 2 | 2 | 40.2 (min 24.6) |
+| png | 352.5 | 100.6% | 55 | 17 | lossless |
+| webp-lossless | 245.9 | 70.2% | 403 | 15 | lossless |
+| webp-q90 | 53.9 | 15.4% | 78 | 13 | 40.4 (min 24.8) |
+| webp-q80 | 35.2 | 10.0% | 69 | 9 | 36.9 (min 24.7) |
+| webp-q60 | 24.7 | 7.0% | 62 | 7 | 34.7 (min 24.4) |
+| avif-q80 | 43.8 | 12.5% | 88 | 6 | 40.4 (min 24.7) |
+| avif-q60 | 25.7 | 7.3% | 83 | 5 | 36.4 (min 24.5) |
+| avif-q40 | 12.0 | 3.4% | 67 | 4 | 32.0 (min 23.7) |
+| jpeg-q90 | 67.5 | 19.3% | 3 | 3 | 40.2 (min 24.6) |
 | jpeg-q75 | 42.2 | 12.0% | 2 | 2 | 35.5 (min 23.8) |
-| png-1024px | 179.3 | 51.2% | 29 | 8 | n/a: resized for 127 of 212 images |
-| webp-q80-1024px | 18.9 | 5.4% | 35 | 5 | n/a: resized for 127 of 212 images |
+| png-1024px | 179.3 | 51.2% | 38 | 11 | n/a: resized for 127 of 212 images |
+| webp-q80-1024px | 18.9 | 5.4% | 46 | 6 | n/a: resized for 127 of 212 images |
 
 ##### Audio: 14 synthesized speech clips (419 s)
 
 | arm | total MB | % of 44.1 kHz WAV | avg kbit/s | median encode ms | median decode ms |
 |---|---|---|---|---|---|
-| wav-44k | 36.98 | 100.0% | 706 | 58 | 56 |
-| wav-16k | 13.42 | 36.3% | 256 | 61 | 46 |
-| flac-44k | 13.41 | 36.3% | 256 | 67 | 45 |
-| flac-16k | 8.14 | 22.0% | 155 | 56 | 44 |
-| opus-32k | 1.53 | 4.1% | 29 | 246 | 77 |
-| opus-24k | 1.18 | 3.2% | 23 | 247 | 77 |
-| opus-12k | 0.64 | 1.7% | 12 | 248 | 75 |
-| aac-48k | 2.76 | 7.5% | 53 | 274 | 60 |
-| mp3-64k | 3.36 | 9.1% | 64 | 169 | 58 |
+| wav-44k | 36.98 | 100.0% | 706 | 82 | 77 |
+| wav-16k | 13.42 | 36.3% | 256 | 82 | 63 |
+| flac-44k | 13.41 | 36.3% | 256 | 98 | 64 |
+| flac-16k | 8.14 | 22.0% | 155 | 86 | 64 |
+| opus-32k | 1.53 | 4.1% | 29 | 323 | 96 |
+| opus-24k | 1.18 | 3.2% | 23 | 321 | 94 |
+| opus-12k | 0.64 | 1.7% | 12 | 328 | 97 |
+| aac-48k | 2.76 | 7.5% | 53 | 360 | 70 |
+| mp3-64k | 3.36 | 9.1% | 64 | 229 | 72 |
 
 ### 8. Unstructured payloads through the server
 
@@ -508,6 +509,275 @@ summed over the same queries. This is the only measure of run-to-run variation i
 | default | selector min_latency | 27.9 | 27.8 | 0.3% |
 | default | identical bytes 1532/1532, same format choice 3064/3064 |  |  |  |
 
+### 10. Lossy image and audio arms: do they pay, and do they change the answer?
+
+Section 7 measured bytes and fidelity; this section asks whether a lossy arm is worth using. Two separate questions.
+
+**Bytes versus tokens.** A vision model charges by image dimensions, not file size. Claude counts one token per 28 x 28
+pixel patch (ceil(width / 28) x ceil(height / 28)) and downsizes anything above 1568 px on the long edge (2576 px for newer
+models); Gemini counts 258 tokens per 768 x 768 tile [7] [8]. File format and compression do not enter either formula. On
+the 212 M3-Bench images the median long edge is 1200 px and only 21% exceed 1568 px, so a lossy codec at the same
+resolution saves transfer bytes and nothing else; only resizing saves tokens (median 1,369 tokens as-is, 899 at a
+1024 px long edge by the Claude formula).
+
+**Time to deliver.** Transfer time against encode and decode time, for each link, relative to sending the lossless original
+(encode and decode are in-process, one file at a time):
+
+Speed-up = time to deliver the lossless original / time to encode, send and decode the arm (median over items; above 1x the arm is faster). `faster on` is the share of items where it is.
+
+#### Images (PNG original)
+
+| arm | bytes vs original (median; smaller on) | objects agreement (Gemini) | LAN speed-up (faster on) | WAN speed-up (faster on) | cellular speed-up (faster on) | bad wifi speed-up (faster on) |
+|---|---|---|---|---|---|---|
+| png | 99.2%; 65% | - | 0.32x (0%) | 0.79x (0%) | 0.95x (9%) | 0.98x (22%) |
+| webp-lossless | 67.5%; 95% | 0.89 | 0.06x (0%) | 0.36x (0%) | 0.88x (28%) | 1.09x (72%) |
+| webp-q90 | 15.9%; 90% | - | 0.29x (0%) | 1.77x (77%) | 4.03x (83%) | 4.93x (84%) |
+| webp-q80 | 10.9%; 93% | 0.77 | 0.33x (0%) | 2.19x (78%) | 5.42x (84%) | 6.84x (87%) |
+| webp-q60 | 7.7%; 96% | 0.81 | 0.37x (0%) | 2.56x (81%) | 6.85x (84%) | 8.92x (91%) |
+| avif-q80 | 13.1%; 98% | - | 0.26x (0%) | 1.70x (67%) | 4.49x (82%) | 5.77x (84%) |
+| avif-q60 | 7.9%; 100% | 0.78 | 0.30x (0%) | 2.02x (68%) | 5.95x (83%) | 8.09x (84%) |
+| avif-q40 | 3.5%; 100% | 0.79 | 0.38x (0%) | 2.72x (73%) | 9.30x (83%) | 13.78x (85%) |
+| jpeg-q90 | 19.6%; 84% | - | 3.26x (85%) | 4.76x (84%) | 5.02x (84%) | 5.05x (84%) |
+| jpeg-q75 | 12.7%; 87% | 0.81 | 4.29x (93%) | 7.16x (91%) | 7.75x (87%) | 7.83x (87%) |
+| png-1024px | 85.8%; 78% | 0.82 | 0.41x (9%) | 0.92x (48%) | 1.08x (54%) | 1.12x (57%) |
+| webp-q80-1024px | 7.7%; 93% | 0.75 | 0.43x (10%) | 2.82x (79%) | 7.17x (86%) | 9.20x (92%) |
+
+#### Audio (WAV original)
+
+| arm | bytes vs original (median; smaller on) | WER change vs original (pp) | LAN speed-up (faster on) | WAN speed-up (faster on) | cellular speed-up (faster on) | bad wifi speed-up (faster on) |
+|---|---|---|---|---|---|---|
+| wav-44k | 100.0%; 0% | +0.00 | 0.55x (0%) | 0.86x (0%) | 0.96x (0%) | 0.98x (0%) |
+| wav-16k | 36.3%; 100% | +0.00 | 0.64x (0%) | 1.66x (100%) | 2.40x (100%) | 2.56x (100%) |
+| flac-44k | 39.1%; 100% | +0.00 | 0.56x (0%) | 1.53x (100%) | 2.20x (100%) | 2.34x (100%) |
+| flac-16k | 22.9%; 100% | +0.00 | 0.63x (0%) | 1.98x (100%) | 3.40x (100%) | 3.81x (100%) |
+| opus-32k | 4.3%; 100% | +0.00 | 0.24x (0%) | 1.10x (86%) | 4.11x (100%) | 6.88x (100%) |
+| opus-24k | 3.3%; 100% | +0.34 | 0.24x (0%) | 1.12x (86%) | 4.31x (100%) | 7.43x (100%) |
+| opus-12k | 1.8%; 100% | +0.69 | 0.24x (0%) | 1.12x (93%) | 4.53x (100%) | 8.25x (100%) |
+| aac-48k | 7.1%; 100% | +0.34 | 0.23x (0%) | 1.00x (50%) | 3.41x (100%) | 5.40x (100%) |
+| mp3-64k | 9.1%; 100% | +0.00 | 0.33x (0%) | 1.40x (100%) | 4.22x (100%) | 6.05x (100%) |
+
+**Does it change what the model says.** Four checks, none of them a measure of task success:
+- *Controls.* `png-rerun` sends the untouched pixels a second time, so any gap from 1.00 is the model's own run-to-run
+  noise (Gemini at temperature 0, thinking off). The local model at temperature 0 with a fixed seed is deterministic,
+  so its controls read 1.00 by construction and `jpeg-q95` (visually identical) is the better floor there.
+- *Natural images* (M3-Bench): two models, Gemini 2.5 Flash on Vertex AI and Qwen2.5-VL 7B (Q4_K_M, via Ollama) [10]. The score is agreement with the model's own answer on the untouched image (token F1 of two
+  fixed questions: transcribe the visible text, list the main objects). There is no ground truth, so this measures whether
+  the arm changed what the model said, not whether it was right.
+- *Documents* (images rendered from known text): the score is character error rate against the true text, so it is
+  correctness. They are small synthetic strips of plain text; real screenshots, charts and scans were not tested.
+- *Audio* (synthetic speech, local Whisper `small.en` [9] through `mlx-whisper`): word error rate against the exact script, clean and with white
+  noise mixed in at 20, 10 and 5 dB signal-to-noise before encoding.
+
+#### Audio: word error rate with a local Whisper model (14 clips)
+
+| audio arm | bytes (% of WAV) | mean WER | change vs original | worst clip | clips worse |
+|---|---|---|---|---|---|
+| original | 100.0% | 1.27% | +0.00 pp | +0.0 pp | 0 of 14 |
+| wav-44k | 100.0% | 1.27% | +0.00 pp | +0.0 pp | 0 of 14 |
+| wav-16k | 36.3% | 1.27% | +0.00 pp | +0.0 pp | 0 of 14 |
+| flac-44k | 37.7% | 1.27% | +0.00 pp | +0.0 pp | 0 of 14 |
+| flac-16k | 22.9% | 1.27% | +0.00 pp | +0.0 pp | 0 of 14 |
+| opus-32k | 4.2% | 1.27% | +0.00 pp | +0.0 pp | 0 of 14 |
+| opus-24k | 3.3% | 1.61% | +0.34 pp | +2.4 pp | 2 of 14 |
+| opus-12k | 1.8% | 1.96% | +0.69 pp | +4.9 pp | 3 of 14 |
+| aac-48k | 7.4% | 1.61% | +0.34 pp | +2.4 pp | 2 of 14 |
+| mp3-64k | 9.1% | 1.27% | +0.00 pp | +0.0 pp | 0 of 14 |
+
+#### Audio under added noise: change in word error rate against the unencoded noisy clip
+
+| audio arm | bytes (% of WAV) | WER change, clean | WER change, 20 dB | WER change, 10 dB | WER change, 5 dB |
+|---|---|---|---|---|---|
+| original | 100.0% | +0.00 pp | +0.00 pp | +0.00 pp | +0.00 pp |
+| wav-44k | 100.0% | +0.00 pp | +0.00 pp | +0.00 pp | +0.00 pp |
+| wav-16k | 36.3% | +0.00 pp | +0.00 pp | +0.00 pp | +0.00 pp |
+| flac-44k | 37.7% | +0.00 pp | +0.00 pp | +0.00 pp | +0.00 pp |
+| flac-16k | 22.9% | +0.00 pp | +0.00 pp | +0.00 pp | +0.00 pp |
+| opus-32k | 4.2% | +0.00 pp | -0.16 pp | +0.87 pp | +0.40 pp |
+| opus-24k | 3.3% | +0.34 pp | +0.17 pp | +0.51 pp | +1.06 pp |
+| opus-12k | 1.8% | +0.69 pp | +0.54 pp | +2.34 pp | +4.13 pp |
+| aac-48k | 7.4% | +0.34 pp | +0.19 pp | +1.21 pp | +1.04 pp |
+| mp3-64k | 9.1% | +0.00 pp | +0.19 pp | +0.00 pp | +0.52 pp |
+| unencoded WER |  | 1.27% | 1.44% | 1.45% | 2.61% |
+
+#### Rendered documents (documents): character error rate of a local 7B vision model against the true text (14 texts at 11, 14, 18 px)
+
+| arm | n | bytes (% of PNG) | mean CER | worst CER | images with any error |
+|---|---|---|---|---|---|
+| avif-q40 | 42 | 45% | 0.03% | 1.0% | 2 of 42 |
+| avif-q60 | 42 | 58% | 0.03% | 1.0% | 2 of 42 |
+| avif-q80 | 42 | 74% | 0.03% | 1.0% | 2 of 42 |
+| jpeg-q75 | 42 | 178% | 0.03% | 1.0% | 2 of 42 |
+| jpeg-q90 | 42 | 250% | 0.03% | 1.0% | 2 of 42 |
+| jpeg-q95 | 42 | 317% | 0.03% | 1.0% | 2 of 42 |
+| png | 42 | 100% | 0.03% | 1.0% | 2 of 42 |
+| png-rerun | 42 | 100% | 0.03% | 1.0% | 2 of 42 |
+| webp-lossless | 42 | 34% | 0.03% | 1.0% | 2 of 42 |
+| webp-q60 | 42 | 104% | 0.03% | 1.0% | 2 of 42 |
+| webp-q80 | 42 | 122% | 0.03% | 1.0% | 2 of 42 |
+| webp-q90 | 42 | 148% | 0.03% | 1.0% | 2 of 42 |
+| png-0.5x | 42 | 133% | 0.05% | 1.0% | 3 of 42 |
+
+#### Rendered documents (documents, harsher settings): character error rate of a local 7B vision model against the true text (14 texts at 7, 9 px)
+
+| arm | n | bytes (% of PNG) | mean CER | worst CER | images with any error |
+|---|---|---|---|---|---|
+| png | 28 | 100% | 0.03% | 0.4% | 4 of 28 |
+| png-rerun | 28 | 100% | 0.03% | 0.4% | 4 of 28 |
+| webp-q30 | 28 | 105% | 0.07% | 0.8% | 6 of 28 |
+| jpeg-q30 | 28 | 132% | 0.09% | 0.6% | 11 of 28 |
+| avif-q20 | 28 | 45% | 12.89% | 84.5% | 16 of 28 |
+| png-0.25x | 27 | 54% | 79.68% | 108.6% | 27 of 27 |
+
+#### Images, Gemini 2.5 Flash on Vertex AI: agreement with its answer on the untouched image (116 images)
+
+| image arm | n | bytes, median % of PNG (share of images smaller) | PSNR dB | SSIM | OCR agreement (95% CI) | objects agreement (95% CI) |
+|---|---|---|---|---|---|---|
+| png-rerun | 106 | 99.2% (63% smaller) | 99.0 | 1.000 | 0.97 (0.95-0.99) | 0.87 (0.84-0.91) |
+| png-1024px | 116 | 75.7% (78% smaller) | 99.0 | 1.000 | 0.94 (0.91-0.97) | 0.82 (0.79-0.85) |
+| webp-lossless | 116 | 68.0% (95% smaller) | 99.0 | 1.000 | 0.97 (0.94-0.99) | 0.89 (0.85-0.92) |
+| jpeg-q95 | 116 | 27.4% (84% smaller) | 41.9 | 0.983 | 0.96 (0.93-0.98) | 0.83 (0.80-0.86) |
+| jpeg-q75 | 116 | 12.7% (91% smaller) | 36.4 | 0.953 | 0.95 (0.92-0.98) | 0.81 (0.78-0.84) |
+| webp-q80 | 116 | 10.9% (95% smaller) | 37.2 | 0.962 | 0.93 (0.90-0.96) | 0.77 (0.73-0.81) |
+| avif-q60 | 116 | 8.0% (100% smaller) | 38.2 | 0.961 | 0.96 (0.93-0.98) | 0.78 (0.74-0.82) |
+| webp-q60 | 116 | 7.8% (96% smaller) | 34.7 | 0.942 | 0.94 (0.91-0.97) | 0.81 (0.77-0.84) |
+| webp-q80-1024px | 116 | 7.6% (95% smaller) | 37.5 | 0.963 | 0.93 (0.89-0.96) | 0.75 (0.72-0.79) |
+| avif-q40 | 116 | 3.5% (100% smaller) | 33.6 | 0.912 | 0.93 (0.88-0.96) | 0.79 (0.75-0.82) |
+
+#### Images, local 7B vision model: agreement with its answer on the untouched image (30 images)
+
+| image arm | n | bytes, median % of PNG (share of images smaller) | PSNR dB | SSIM | OCR agreement (95% CI) | objects agreement (95% CI) |
+|---|---|---|---|---|---|---|
+| png-rerun | 30 | 98.7% (67% smaller) | 99.0 | 1.000 | 1.00 (1.00-1.00) | 1.00 (1.00-1.00) |
+| png-1024px | 30 | 88.6% (77% smaller) | 99.0 | 1.000 | 0.95 (0.87-1.00) | 0.86 (0.79-0.92) |
+| jpeg-q95 | 30 | 25.4% (83% smaller) | 43.6 | 0.987 | 0.99 (0.97-1.00) | 0.88 (0.83-0.92) |
+| jpeg-q75 | 30 | 12.2% (83% smaller) | 39.5 | 0.966 | 0.98 (0.96-1.00) | 0.90 (0.86-0.93) |
+| webp-q60 | 30 | 7.7% (93% smaller) | 35.2 | 0.948 | 0.96 (0.90-1.00) | 0.81 (0.76-0.85) |
+| avif-q40 | 30 | 3.5% (100% smaller) | 33.9 | 0.922 | 0.93 (0.83-1.00) | 0.85 (0.79-0.90) |
+
+Intervals are 95% bootstrap intervals over images. The local-model rows use 30 images and 6 arms (about 75 s per
+image and arm on this machine); the Gemini rows use up to 116 images.
+
+### 11. Cost-aware selector: offline replay
+
+The current selector picks the arm with the fewest bytes (or, with a link speed set, the least transfer time) and ignores
+how long compressing and decompressing take. The replayed policy scores each arm as compute time plus wire bytes / bandwidth
+and takes the minimum; the compute model is fitted leave-one-out on the unstructured payload runs of section 8. Each
+chosen arm's latency is the one measured when that arm was forced on that payload and link; the policy is replayed, not
+deployed. Knowing each arm's size costs something too, so it is charged: "exact + hints" adds the measured size-checking
+time (a lower bound), "sampled" extrapolates sizes from the first 256 KB and charges the time that took, and
+"sampled + fast skip" sends raw without sampling on a 1 Gbit/s or faster link. The module docstring of
+`benchmarks/analysis/cost_model.py` has the exact rules.
+
+Latency totals divided by the per-payload oracle (the best of the four arms, measured). 1.00x is perfect. `selector` rows are what the current server selector did in the run, hint computation included. See the module docstring for what each cost-aware variant is charged.
+
+| link | kind (n) | oracle total (s) | free exact sizes | exact+hints | sampled | sampled+fast skip | selector min_bytes | selector min_latency | best fixed arm |
+|---|---|---|---|---|---|---|---|---|---|
+| localhost | image (212) | 0.94 | 1.00x | 3.77x | 1.87x | 1.00x | 4.07x | 4.11x | 1.00x (raw) |
+| localhost | audio (14) | 0.08 | 1.00x | 19.66x | 2.33x | 1.00x | 21.31x | 21.72x | 1.00x (raw) |
+| localhost | text (8) | 0.06 | 1.02x | 10.80x | 1.75x | 1.02x | 10.60x | 10.76x | 1.02x (raw) |
+| lan | image (24) | 0.41 | 1.03x | 1.62x | 1.24x | 1.03x | 1.62x | 1.57x | 1.03x (raw) |
+| lan | audio (14) | 0.41 | 1.06x | 4.75x | 1.28x | 1.00x | 4.93x | 4.92x | 1.00x (raw) |
+| lan | text (8) | 0.13 | 1.00x | 5.18x | 1.31x | 2.60x | 5.02x | 5.01x | 1.03x (zstd) |
+| wan | image (24) | 8.71 | 1.03x | 1.09x | 1.04x | 1.04x | 1.06x | 1.05x | 1.01x (zstd) |
+| wan | audio (14) | 7.78 | 1.06x | 1.28x | 1.08x | 1.08x | 1.21x | 1.21x | 1.00x (zstd) |
+| wan | text (8) | 2.02 | 1.01x | 1.33x | 1.03x | 1.03x | 1.28x | 1.29x | 1.00x (zstd) |
+| cellular | image (24) | 30.11 | 1.02x | 1.04x | 1.02x | 1.02x | 1.03x | 1.03x | 1.01x (zstd) |
+| cellular | audio (14) | 30.02 | 1.01x | 1.08x | 1.02x | 1.02x | 1.05x | 1.05x | 1.01x (brotli) |
+| cellular | text (8) | 5.21 | 1.01x | 1.14x | 1.03x | 1.03x | 1.13x | 1.10x | 1.01x (zstd) |
+| badwifi | image (24) | 47.13 | 1.01x | 1.02x | 1.01x | 1.01x | 1.02x | 1.01x | 1.01x (zstd) |
+| badwifi | audio (14) | 51.73 | 1.00x | 1.04x | 1.00x | 1.00x | 1.02x | 1.03x | 1.00x (brotli) |
+| badwifi | text (8) | 5.93 | 1.02x | 1.12x | 1.04x | 1.04x | 1.07x | 1.08x | 1.01x (zstd) |
+
+#### Arms picked by the sampled variant
+
+| link | kind | picks |
+|---|---|---|
+| localhost | image | raw: 212 |
+| localhost | audio | raw: 14 |
+| localhost | text | raw: 8 |
+| lan | image | raw: 24 |
+| lan | audio | raw: 11, zstd: 3 |
+| lan | text | raw: 1, zstd: 7 |
+| wan | image | raw: 22, zstd: 2 |
+| wan | audio | brotli: 14 |
+| wan | text | brotli: 3, zstd: 5 |
+| cellular | image | raw: 20, zstd: 4 |
+| cellular | audio | brotli: 14 |
+| cellular | text | brotli: 8 |
+| badwifi | image | brotli: 3, raw: 18, zstd: 3 |
+| badwifi | audio | brotli: 14 |
+| badwifi | text | brotli: 8 |
+
+#### Sampled variant when the believed link speed is wrong (regret vs oracle)
+
+| link | kind | believed 0.25x | believed 1x | believed 4x |
+|---|---|---|---|---|
+| localhost | image | 1.87x | 1.87x | 1.87x |
+| localhost | audio | 2.33x | 2.33x | 2.33x |
+| localhost | text | 1.84x | 1.75x | 1.75x |
+| lan | image | 1.25x | 1.24x | 1.24x |
+| lan | audio | 1.40x | 1.28x | 1.27x |
+| lan | text | 1.31x | 1.31x | 1.38x |
+| wan | image | 1.04x | 1.04x | 1.04x |
+| wan | audio | 1.08x | 1.08x | 1.02x |
+| wan | text | 1.10x | 1.03x | 1.02x |
+| cellular | image | 1.01x | 1.02x | 1.03x |
+| cellular | audio | 1.02x | 1.02x | 1.02x |
+| cellular | text | 1.03x | 1.03x | 1.01x |
+| badwifi | image | 1.01x | 1.01x | 1.01x |
+| badwifi | audio | 1.01x | 1.00x | 1.00x |
+| badwifi | text | 1.04x | 1.04x | 1.04x |
+
+### 12. Table codec defaults: snappy / none against zstd / zstd
+
+The Python server's default table codecs changed from snappy Parquet and uncompressed Arrow IPC to zstd for both. Same
+BIRD queries, same server and link; only `PARQUET_COMPRESSION` and `ARROW_IPC_COMPRESSION` differ (the benchmark scripts
+still pin the old values, so every other section is unchanged). The selector sizes its hints with the server's default
+codecs, so the default also changes what it picks.
+
+| link | queries | strategy | total s (snappy/none) | total s (zstd/zstd) | ratio | p95 s (snappy/none) | p95 s (zstd/zstd) | MB (snappy/none) | MB (zstd/zstd) | ratio |
+|---|---|---|---|---|---|---|---|---|---|---|
+| localhost | 1532 | Parquet | 35.2 | 33.6 | 0.96x | 0.07 | 0.07 | 6.6 | 5.1 | 0.77x |
+| localhost | 1532 | Arrow IPC | 33.8 | 32.9 | 0.97x | 0.07 | 0.07 | 30.3 | 5.9 | 0.19x |
+| localhost | 1532 | selector min_bytes | 30.3 | 29.8 | 0.98x | 0.07 | 0.07 | 4.8 | 3.2 | 0.67x |
+| localhost | 1532 | selector min_latency | 30.2 | 29.3 | 0.97x | 0.07 | 0.07 | 4.8 | 3.2 | 0.67x |
+| LAN (1 ms, 1 Gbit) | 307 | Parquet | 8.8 | 8.9 | 1.00x | 0.09 | 0.09 | 0.8 | 0.7 | 0.87x |
+| LAN (1 ms, 1 Gbit) | 307 | Arrow IPC | 8.3 | 8.4 | 1.01x | 0.08 | 0.08 | 3.7 | 1.0 | 0.26x |
+| LAN (1 ms, 1 Gbit) | 307 | selector min_bytes | 7.1 | 7.2 | 1.02x | 0.08 | 0.08 | 0.5 | 0.4 | 0.76x |
+| LAN (1 ms, 1 Gbit) | 307 | selector min_latency | 6.7 | 6.8 | 1.02x | 0.07 | 0.07 | 0.5 | 0.4 | 0.78x |
+| LAN, results over 50K cells | 5 | Parquet | 1.6 | 1.6 | 1.01x | 0.57 | 0.58 | 2.1 | 1.3 | 0.60x |
+| LAN, results over 50K cells | 5 | Arrow IPC | 1.4 | 1.3 | 0.92x | 0.67 | 0.58 | 19.3 | 1.8 | 0.09x |
+| LAN, results over 50K cells | 5 | selector min_bytes | 1.5 | 1.6 | 1.07x | 0.51 | 0.55 | 2.1 | 1.2 | 0.57x |
+| LAN, results over 50K cells | 5 | selector min_latency | 1.3 | 1.3 | 1.02x | 0.52 | 0.56 | 2.1 | 1.2 | 0.57x |
+| WAN (40 ms, 50 Mbit) | 307 | Parquet | 61.6 | 62.5 | 1.01x | 0.24 | 0.25 | 0.8 | 0.7 | 0.87x |
+| WAN (40 ms, 50 Mbit) | 307 | Arrow IPC | 61.6 | 62.0 | 1.01x | 0.27 | 0.25 | 3.7 | 1.0 | 0.26x |
+| WAN (40 ms, 50 Mbit) | 307 | selector min_bytes | 37.7 | 38.4 | 1.02x | 0.22 | 0.24 | 0.5 | 0.4 | 0.76x |
+| WAN (40 ms, 50 Mbit) | 307 | selector min_latency | 37.0 | 37.9 | 1.02x | 0.22 | 0.23 | 0.5 | 0.4 | 0.76x |
+| WAN, results over 50K cells | 5 | Parquet | 3.2 | 3.6 | 1.15x | 1.15 | 1.27 | 2.1 | 1.3 | 0.60x |
+| WAN, results over 50K cells | 5 | Arrow IPC | 5.3 | 3.0 | 0.57x | 3.08 | 1.23 | 19.3 | 1.8 | 0.09x |
+| WAN, results over 50K cells | 5 | selector min_bytes | 3.2 | 3.6 | 1.13x | 1.03 | 1.07 | 2.1 | 1.2 | 0.57x |
+| WAN, results over 50K cells | 5 | selector min_latency | 2.4 | 2.7 | 1.10x | 0.93 | 1.00 | 2.1 | 1.2 | 0.57x |
+| Cellular (80 ms, 10 Mbit) | 307 | Parquet | 114.9 | 115.0 | 1.00x | 0.47 | 0.47 | 0.8 | 0.7 | 0.87x |
+| Cellular (80 ms, 10 Mbit) | 307 | Arrow IPC | 116.4 | 114.2 | 0.98x | 0.49 | 0.46 | 3.7 | 1.0 | 0.26x |
+| Cellular (80 ms, 10 Mbit) | 307 | selector min_bytes | 69.6 | 69.2 | 0.99x | 0.44 | 0.44 | 0.5 | 0.4 | 0.76x |
+| Cellular (80 ms, 10 Mbit) | 307 | selector min_latency | 68.1 | 67.7 | 0.99x | 0.41 | 0.41 | 0.5 | 0.4 | 0.76x |
+| Cellular, results over 50K cells | 5 | Parquet | 6.5 | 5.8 | 0.89x | 2.51 | 2.03 | 2.1 | 1.3 | 0.60x |
+| Cellular, results over 50K cells | 5 | Arrow IPC | 19.0 | 5.2 | 0.27x | 12.43 | 2.24 | 19.3 | 1.8 | 0.09x |
+| Cellular, results over 50K cells | 5 | selector min_bytes | 6.3 | 5.5 | 0.88x | 2.39 | 1.71 | 2.1 | 1.2 | 0.57x |
+| Cellular, results over 50K cells | 5 | selector min_latency | 5.1 | 4.5 | 0.88x | 2.25 | 1.77 | 2.1 | 1.2 | 0.57x |
+
+#### TPC-DS catalog_sales (localhost measured, slower links modelled)
+
+| strategy | grid cells | MB (snappy/none / zstd/zstd) | localhost: total s (snappy/none / zstd/zstd) | LAN 1 Gbit: total s (snappy/none / zstd/zstd) | WAN 50 Mbit: total s (snappy/none / zstd/zstd) | cellular 10 Mbit: total s (snappy/none / zstd/zstd) |
+|---|---|---|---|---|---|---|
+| fixed:arrow_ipc_blob | 9 | 375 / 48 | 0.6 / 0.2 (0.27x) | 3.6 / 0.5 (0.15x) | 60.6 / 7.9 (0.13x) | 300.5 / 38.8 (0.13x) |
+| fixed:arrow_ipc_stream | 9 | 377 / 49 | 8.6 / 8.7 (1.01x) | 11.6 / 9.1 (0.78x) | 68.9 / 16.4 (0.24x) | 310.3 / 47.5 (0.15x) |
+| fixed:parquet_blob | 9 | 59 / 48 | 0.2 / 0.2 (1.02x) | 0.6 / 0.6 (0.86x) | 9.7 / 7.8 (0.81x) | 47.7 / 38.3 (0.80x) |
+| fixed:parquet_stream | 9 | 64 / 50 | 9.5 / 9.8 (1.03x) | 10.0 / 10.2 (1.02x) | 19.7 / 17.7 (0.90x) | 60.6 / 49.5 (0.82x) |
+| selector:min_bytes | 9 | 59 / 46 | 0.2 / 0.2 (0.82x) | 0.7 / 0.5 (0.79x) | 9.7 / 7.6 (0.78x) | 47.7 / 37.2 (0.78x) |
+| selector:min_latency | 9 | 59 / 46 | 0.2 / 0.2 (0.86x) | 0.7 / 0.5 (0.80x) | 9.7 / 7.6 (0.78x) | 47.7 / 37.2 (0.78x) |
+| selector:min_time_to_first_rows | 9 | 64 / 48 | 10.0 / 9.3 (0.93x) | 10.5 / 9.7 (0.92x) | 20.2 / 16.9 (0.84x) | 61.1 / 47.4 (0.78x) |
+
 ## Findings
 
 - On every dataset here the selector sends the fewest bytes of any strategy (tied with always-Parquet on TPC-DS, where it
@@ -530,6 +800,37 @@ summed over the same queries. This is the only measure of run-to-run variation i
 - **Text and JSON** (8 payloads, 34 MB): gzip sends 11% of the raw bytes, zstd 9%, brotli 8%.
 - **Selector on unstructured payloads:** its total latency is within 15% of the best fixed arm in 7 of 15 kind and network combinations. The rest are slower: audio, localhost 21.7x; text, localhost 10.5x; audio, lan 4.9x; text, lan 4.9x; image, localhost 4.1x; image, lan 1.5x; text, wan 1.3x; audio, wan 1.2x. It picks the smallest arm by size and does not model compression time, so where bytes are cheap (localhost, LAN) the size hints and the extra compression cost more than they save.
 - The TPC-DS table shows Python's Arrow IPC output is larger than Java's on wide tables; the cause was not investigated.
+- **Lossy image and audio arms (section 10).** A lossy image codec saves transfer bytes, not model tokens: tokens depend
+  on pixel dimensions, and only 21% of the M3-Bench images are large enough for a provider to downscale. The byte saving is
+  large where it exists (median WebP q80 is 11% and AVIF q60 8% of the PNG), but it is not universal: 4% to 13% of the
+  images (screenshots and graphics that PNG already compresses well) come out larger under WebP q60, WebP q80 and
+  JPEG q75, and the rendered text documents came out 104% to 317% of the PNG under WebP and JPEG. A selector must compare real
+  sizes, not assume a lossy arm is smaller. Lossy arms beat the lossless original only on WAN or slower; on a LAN
+  WebP and AVIF are slower end to end (median 0.3x to 0.4x) because encoding takes longer than sending, and only JPEG
+  stays faster (4.3x at q75).
+- **Lossy arms and what the model says (section 10).** Reading text survives: Gemini's OCR agreement with its own answer on
+  the original is 0.93 to 0.96 for every lossy arm against 0.97 for the rerun control. Open-ended object lists drift more:
+  agreement is 0.75 to 0.83 against a control of 0.87, with intervals clear of the control for WebP q80 (with and without the
+  1024 px resize) and both AVIF arms. This measures change, not correctness. On rendered text with a known answer,
+  WebP q30 and JPEG q30 raise the character error rate by under 0.1 point down to 7 px type, AVIF q20 fails at 7 px (mean character error rate 26%, from 0.01% for the
+  original), and a quarter-size image is unreadable (93% at 7 px, 68% at 9 px).
+- **Audio (section 10).** FLAC and 16 kHz WAV leave word error rate unchanged, including under added noise, at 22% to
+  37% of the WAV. Opus at 32 kbit/s is 4% of the WAV and unchanged on clean speech but loses 0.9 points at 10 dB
+  signal-to-noise; Opus at 12 kbit/s loses 0.7 points on clean speech and 4.1 points at 5 dB.
+- **Cost-aware selector (section 11).** Replayed offline, a policy that weighs compute time against transfer time
+  stays within 1.01x to 1.08x of the best arm on WAN, cellular and bad wifi, against 1.01x to 1.29x for the current
+  selector. On localhost and LAN the current selector is 1.6x to 22x slower than the best arm because it compresses
+  every arm to count bytes. Charging the new policy for estimating sizes still leaves it 1.2x to 2.3x slower than sending
+  raw on those links; skipping the estimate on 1 Gbit/s or faster links removes that on localhost (1.00x to 1.02x) but costs 2.6x
+  for text on a LAN, so the rule needs to look at content type as well as link speed. On slow links the policy is no better than
+  the best fixed arm (zstd, or brotli for audio): it is 0.00x to 0.08x slower because it pays for the estimate, so the
+  gain is avoiding the fast-link losses. A wrong link-speed estimate (0.25x or 4x) moved the sampled policy's regret by
+  at most 0.12x in any cell.
+- **Table codec defaults (section 12).** zstd for Parquet and Arrow IPC cuts bytes 13% to 40% (Parquet) and 74% to 91%
+  (Arrow IPC) on BIRD, with total latency within 4% on localhost, LAN and WAN for the typical query. On BIRD results above
+  50K cells over cellular, Arrow IPC went from 19.0 s to 5.2 s (5 queries). On TPC-DS the min_bytes and min_latency selector's total latency
+  was 0.78x to 0.86x of the snappy default on every link (59 MB to 46 MB), Arrow IPC blob 0.13x to 0.27x, and
+  Parquet blob 0.80x to 1.02x; the slow-link rows there are modelled from bytes, not measured through the proxy.
 
 ## Limitations
 
@@ -547,8 +848,9 @@ summed over the same queries. This is the only measure of run-to-run variation i
 - The zstd and brotli arms, the tiny-text rule and the already-compressed check exist only in the Python server; the Java
   server has no equivalents, so section 8 has no Java comparison.
 - The image set is M3-Bench's task inputs, not tool-returned images; the speech is synthetic; PDFs and video are not covered.
-  Lossy arms were not tested for effect on model answers.
-- Not done: the bandit (`use_mab`) was not run, no LLM accuracy or token measurement.
+  Lossy arms were tested for effect on model answers only as described in section 10: agreement with the model's own
+  answer, not task success, and no Claude model.
+- Not done: the bandit (`use_mab`) was not run, and no end-to-end agent task accuracy was measured (section 10 compares a model's answers with and without a lossy arm).
 
 ## Reproduce
 
@@ -593,3 +895,15 @@ Multi-Threaded Tool-Using MLLM Agent Benchmark." arXiv:2511.17729, 2025. https:/
 
 [6] S. Mukkera, C. Liu. "TransForm: Dynamic Format Selection for MCP Tool Outputs in Agentic Data Systems." VLDB 2026
 Workshop: NOVAS (source: `novas-workshop/main.tex`; the baseline this work reproduces).
+
+[7] Anthropic. "Vision." Claude API documentation. https://platform.claude.com/docs/en/build-with-claude/vision
+(accessed 2026-10-19; image token formula and resize limits).
+
+[8] Google. "Image understanding." Gemini API documentation. https://ai.google.dev/gemini-api/docs/image-understanding
+(accessed 2026-10-19; per-tile token cost).
+
+[9] A. Radford, J. W. Kim, T. Xu, G. Brockman, C. McLeavey, I. Sutskever. "Robust Speech Recognition via Large-Scale Weak
+Supervision." arXiv:2212.04356, 2022. https://arxiv.org/abs/2212.04356
+
+[10] S. Bai et al. "Qwen2.5-VL Technical Report." arXiv:2502.13923, 2025. https://arxiv.org/abs/2502.13923
+

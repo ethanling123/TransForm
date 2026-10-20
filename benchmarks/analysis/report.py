@@ -267,6 +267,10 @@ def cost_facts():
     return max(cost), worst
 
 
+def generated_block(path, **kwargs):
+    return shift_headings((R / path).read_text(), **kwargs) if (R / path).exists() else "not run"
+
+
 def main():
     matrix = run_module("benchmarks.analysis.matrix").replace("### ", "#### ")
     netem = run_module("benchmarks.analysis.network").replace("### ", "#### ")
@@ -296,6 +300,12 @@ def main():
     a, b = (sum(float(r["json_s"]) for r in load(f"bird/matrix_python_{e}_static.csv")) for e in ("data_driven", "default"))
     json_noise = abs(a - b) / min(a, b) * 100
     parity = (R / "parity.txt").read_text().strip() if (R / "parity.txt").exists() else "not recorded"
+    lossy_accuracy = run_module("benchmarks.analysis.lossy")
+    run_module("benchmarks.analysis.lossy_worth")
+    lossy_worth = generated_block("lossy/worth.md")
+    cost_model = generated_block("payloads/cost_model.md")
+    run_module("benchmarks.analysis.defaults")
+    defaults = generated_block("defaults/defaults.md")
 
     text = f"""# TransForm: Python server restoration, results and benchmark checks
 
@@ -329,7 +339,8 @@ Each side's tool names and argument schemas are compared by `python -m benchmark
 | TPC-DS | `catalog_sales` at scale factor 1 (1,441,548 rows x 34 columns) generated with DuckDB's `dsdgen`, grid of 10K/100K/500K rows x 6/20/34 columns taken from the original harness | [3], [4] |
 | Synthetic | generated tables from 100 to 500,000 rows, 10 columns | this repo (`benchmarks/sweeps/synthetic.py`) |
 | M3-Bench images | the 212 PNG images from the Open-M3-Bench dataset (350 MB). They are the benchmark's task inputs (photos and screenshots), not tool results | [5] |
-| Synthesized speech | 14 passages from this repo's docs, spoken by 7 macOS `say` voices, 44.1 kHz mono WAV (35 MB). No real recordings | `benchmarks/datasets/speech.py` |
+| Synthesized speech | 14 passages of everyday prose (`benchmarks/datasets/speech_passages.txt`), spoken by 7 macOS `say` voices, 44.1 kHz mono WAV (35 MB). No real recordings | `benchmarks/datasets/speech.py` |
+| Rendered documents | the same 14 passages (three at a time) drawn as white-page images at 7 to 18 px type; the text is the ground truth | `benchmarks/sweeps/lossy.py` |
 
 ## Results
 
@@ -387,9 +398,9 @@ fetched repeatedly. The BIRD results are narrow (1 to 3 columns), so they say li
 ### 7. Images and audio: codec comparison (in-process)
 
 Every image and audio arm measured on the real files, no server. Image fidelity is PSNR against the original (alpha
-flattened onto white); it is a pixel-difference proxy, not task accuracy. Encode times for images ran four at a time, so
-they are inflated; audio times include ffmpeg's start-up (a few tens of ms) and the audio is synthetic speech, which is
-cleaner than field recordings.
+flattened onto white); it is a pixel-difference proxy, not task accuracy (section 10 measures that). Files were encoded one
+at a time, so the timings carry no contention; audio times include ffmpeg's start-up (a few tens of ms) and the audio is
+synthetic speech, which is cleaner than field recordings.
 
 {media}
 
@@ -413,6 +424,61 @@ summed over the same queries. This is the only measure of run-to-run variation i
 
 {replication}
 
+### 10. Lossy image and audio arms: do they pay, and do they change the answer?
+
+Section 7 measured bytes and fidelity; this section asks whether a lossy arm is worth using. Two separate questions.
+
+**Bytes versus tokens.** A vision model charges by image dimensions, not file size. Claude counts one token per 28 x 28
+pixel patch (ceil(width / 28) x ceil(height / 28)) and downsizes anything above 1568 px on the long edge (2576 px for newer
+models); Gemini counts 258 tokens per 768 x 768 tile [7] [8]. File format and compression do not enter either formula. On
+the 212 M3-Bench images the median long edge is 1200 px and only 21% exceed 1568 px, so a lossy codec at the same
+resolution saves transfer bytes and nothing else; only resizing saves tokens (median 1,369 tokens as-is, 899 at a
+1024 px long edge by the Claude formula).
+
+**Time to deliver.** Transfer time against encode and decode time, for each link, relative to sending the lossless original
+(encode and decode are in-process, one file at a time):
+
+{lossy_worth}
+
+**Does it change what the model says.** Four checks, none of them a measure of task success:
+- *Controls.* `png-rerun` sends the untouched pixels a second time, so any gap from 1.00 is the model's own run-to-run
+  noise (Gemini at temperature 0, thinking off). The local model at temperature 0 with a fixed seed is deterministic,
+  so its controls read 1.00 by construction and `jpeg-q95` (visually identical) is the better floor there.
+- *Natural images* (M3-Bench): two models, Gemini 2.5 Flash on Vertex AI and Qwen2.5-VL 7B (Q4_K_M, via Ollama) [10]. The score is agreement with the model's own answer on the untouched image (token F1 of two
+  fixed questions: transcribe the visible text, list the main objects). There is no ground truth, so this measures whether
+  the arm changed what the model said, not whether it was right.
+- *Documents* (images rendered from known text): the score is character error rate against the true text, so it is
+  correctness. They are small synthetic strips of plain text; real screenshots, charts and scans were not tested.
+- *Audio* (synthetic speech, local Whisper `small.en` [9] through `mlx-whisper`): word error rate against the exact script, clean and with white
+  noise mixed in at 20, 10 and 5 dB signal-to-noise before encoding.
+
+{lossy_accuracy}
+
+Intervals are 95% bootstrap intervals over images. The local-model rows use 30 images and 6 arms (about 75 s per
+image and arm on this machine); the Gemini rows use up to 116 images.
+
+### 11. Cost-aware selector: offline replay
+
+The current selector picks the arm with the fewest bytes (or, with a link speed set, the least transfer time) and ignores
+how long compressing and decompressing take. The replayed policy scores each arm as compute time plus wire bytes / bandwidth
+and takes the minimum; the compute model is fitted leave-one-out on the unstructured payload runs of section 8. Each
+chosen arm's latency is the one measured when that arm was forced on that payload and link; the policy is replayed, not
+deployed. Knowing each arm's size costs something too, so it is charged: "exact + hints" adds the measured size-checking
+time (a lower bound), "sampled" extrapolates sizes from the first 256 KB and charges the time that took, and
+"sampled + fast skip" sends raw without sampling on a 1 Gbit/s or faster link. The module docstring of
+`benchmarks/analysis/cost_model.py` has the exact rules.
+
+{cost_model}
+
+### 12. Table codec defaults: snappy / none against zstd / zstd
+
+The Python server's default table codecs changed from snappy Parquet and uncompressed Arrow IPC to zstd for both. Same
+BIRD queries, same server and link; only `PARQUET_COMPRESSION` and `ARROW_IPC_COMPRESSION` differ (the benchmark scripts
+still pin the old values, so every other section is unchanged). The selector sizes its hints with the server's default
+codecs, so the default also changes what it picks.
+
+{defaults}
+
 ## Findings
 
 - On every dataset here the selector sends the fewest bytes of any strategy (tied with always-Parquet on TPC-DS, where it
@@ -432,6 +498,37 @@ summed over the same queries. This is the only measure of run-to-run variation i
   (identical bytes under both settings), and its Parquet files are larger than Python's.
 {formats}
 - The TPC-DS table shows Python's Arrow IPC output is larger than Java's on wide tables; the cause was not investigated.
+- **Lossy image and audio arms (section 10).** A lossy image codec saves transfer bytes, not model tokens: tokens depend
+  on pixel dimensions, and only 21% of the M3-Bench images are large enough for a provider to downscale. The byte saving is
+  large where it exists (median WebP q80 is 11% and AVIF q60 8% of the PNG), but it is not universal: 4% to 13% of the
+  images (screenshots and graphics that PNG already compresses well) come out larger under WebP q60, WebP q80 and
+  JPEG q75, and the rendered text documents came out 104% to 317% of the PNG under WebP and JPEG. A selector must compare real
+  sizes, not assume a lossy arm is smaller. Lossy arms beat the lossless original only on WAN or slower; on a LAN
+  WebP and AVIF are slower end to end (median 0.3x to 0.4x) because encoding takes longer than sending, and only JPEG
+  stays faster (4.3x at q75).
+- **Lossy arms and what the model says (section 10).** Reading text survives: Gemini's OCR agreement with its own answer on
+  the original is 0.93 to 0.96 for every lossy arm against 0.97 for the rerun control. Open-ended object lists drift more:
+  agreement is 0.75 to 0.83 against a control of 0.87, with intervals clear of the control for WebP q80 (with and without the
+  1024 px resize) and both AVIF arms. This measures change, not correctness. On rendered text with a known answer,
+  WebP q30 and JPEG q30 raise the character error rate by under 0.1 point down to 7 px type, AVIF q20 fails at 7 px (mean character error rate 26%, from 0.01% for the
+  original), and a quarter-size image is unreadable (93% at 7 px, 68% at 9 px).
+- **Audio (section 10).** FLAC and 16 kHz WAV leave word error rate unchanged, including under added noise, at 22% to
+  37% of the WAV. Opus at 32 kbit/s is 4% of the WAV and unchanged on clean speech but loses 0.9 points at 10 dB
+  signal-to-noise; Opus at 12 kbit/s loses 0.7 points on clean speech and 4.1 points at 5 dB.
+- **Cost-aware selector (section 11).** Replayed offline, a policy that weighs compute time against transfer time
+  stays within 1.01x to 1.08x of the best arm on WAN, cellular and bad wifi, against 1.01x to 1.29x for the current
+  selector. On localhost and LAN the current selector is 1.6x to 22x slower than the best arm because it compresses
+  every arm to count bytes. Charging the new policy for estimating sizes still leaves it 1.2x to 2.3x slower than sending
+  raw on those links; skipping the estimate on 1 Gbit/s or faster links removes that on localhost (1.00x to 1.02x) but costs 2.6x
+  for text on a LAN, so the rule needs to look at content type as well as link speed. On slow links the policy is no better than
+  the best fixed arm (zstd, or brotli for audio): it is 0.00x to 0.08x slower because it pays for the estimate, so the
+  gain is avoiding the fast-link losses. A wrong link-speed estimate (0.25x or 4x) moved the sampled policy's regret by
+  at most 0.12x in any cell.
+- **Table codec defaults (section 12).** zstd for Parquet and Arrow IPC cuts bytes 13% to 40% (Parquet) and 74% to 91%
+  (Arrow IPC) on BIRD, with total latency within 4% on localhost, LAN and WAN for the typical query. On BIRD results above
+  50K cells over cellular, Arrow IPC went from 19.0 s to 5.2 s (5 queries). On TPC-DS the min_bytes and min_latency selector's total latency
+  was 0.78x to 0.86x of the snappy default on every link (59 MB to 46 MB), Arrow IPC blob 0.13x to 0.27x, and
+  Parquet blob 0.80x to 1.02x; the slow-link rows there are modelled from bytes, not measured through the proxy.
 
 ## Limitations
 
@@ -449,8 +546,9 @@ summed over the same queries. This is the only measure of run-to-run variation i
 - The zstd and brotli arms, the tiny-text rule and the already-compressed check exist only in the Python server; the Java
   server has no equivalents, so section 8 has no Java comparison.
 - The image set is M3-Bench's task inputs, not tool-returned images; the speech is synthetic; PDFs and video are not covered.
-  Lossy arms were not tested for effect on model answers.
-- Not done: the bandit (`use_mab`) was not run, no LLM accuracy or token measurement.
+  Lossy arms were tested for effect on model answers only as described in section 10: agreement with the model's own
+  answer, not task success, and no Claude model.
+- Not done: the bandit (`use_mab`) was not run, and no end-to-end agent task accuracy was measured (section 10 compares a model's answers with and without a lossy arm).
 
 ## Reproduce
 
@@ -495,6 +593,18 @@ Multi-Threaded Tool-Using MLLM Agent Benchmark." arXiv:2511.17729, 2025. https:/
 
 [6] S. Mukkera, C. Liu. "TransForm: Dynamic Format Selection for MCP Tool Outputs in Agentic Data Systems." VLDB 2026
 Workshop: NOVAS (source: `novas-workshop/main.tex`; the baseline this work reproduces).
+
+[7] Anthropic. "Vision." Claude API documentation. https://platform.claude.com/docs/en/build-with-claude/vision
+(accessed 2026-10-19; image token formula and resize limits).
+
+[8] Google. "Image understanding." Gemini API documentation. https://ai.google.dev/gemini-api/docs/image-understanding
+(accessed 2026-10-19; per-tile token cost).
+
+[9] A. Radford, J. W. Kim, T. Xu, G. Brockman, C. McLeavey, I. Sutskever. "Robust Speech Recognition via Large-Scale Weak
+Supervision." arXiv:2212.04356, 2022. https://arxiv.org/abs/2212.04356
+
+[10] S. Bai et al. "Qwen2.5-VL Technical Report." arXiv:2502.13923, 2025. https://arxiv.org/abs/2502.13923
+
 """
     Path("REPORT.md").write_text(text)
     print("wrote REPORT.md")

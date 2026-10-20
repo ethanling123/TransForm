@@ -61,16 +61,6 @@ def accuracy_images():
     return {a: st.mean(v) for a, v in by.items()}
 
 
-def accuracy_documents():
-    path = Path("results/lossy/document_accuracy.csv")
-    if not path.exists():
-        return {}
-    by = defaultdict(list)
-    for r in load(path):
-        by[r["arm"]].append(float(r["cer"]))
-    return {a: st.mean(v) for a, v in by.items()}
-
-
 def accuracy_audio():
     by = defaultdict(list)
     path = Path("results/lossy/audio_accuracy.csv")
@@ -93,19 +83,14 @@ def main():
             ("Images (PNG original)", images, "png", "png_bytes", "bytes", accuracy_images(), "objects agreement (Gemini)", "{:.2f}"),
             ("Audio (WAV original)", audio, "wav-44k", "wav_bytes", "bytes", accuracy_audio(), "WER change vs original (pp)", "{:+.2f}")):
         names = list(next(iter(items.values())))
-        size = {a: st.mean(int(items[i][a]["bytes"]) / int(items[i][base][orig_col]) for i in items) for a in names}
-        header = ["arm", "bytes vs original", acc_name] + [f"{n} speed-up (faster on)" for n, _ in LINKS]
+        ratios = {a: [int(items[i][a]["bytes"]) / int(items[i][base][orig_col]) for i in items] for a in names}
+        header = ["arm", "bytes vs original (median; smaller on)", acc_name] + [f"{n} speed-up (faster on)" for n, _ in LINKS]
         per_link = {n: speedups(items, base, orig_col, bytes_col, m) for n, m in LINKS}
         rows = []
         for a in names:
             cells = [f"{per_link[n][a][0]:.2f}x ({per_link[n][a][1]:.0%})" for n, _ in LINKS]
-            rows.append([a, f"{size[a]:.1%}", fmt.format(acc[a]) if a in acc else "-", *cells])
+            rows.append([a, f"{st.median(ratios[a]):.1%}; {sum(x < 1 for x in ratios[a]) / len(ratios[a]):.0%}", fmt.format(acc[a]) if a in acc else "-", *cells])
         out += [f"## {title}", "", table(header, rows), ""]
-    docs = accuracy_documents()
-    if docs:
-        out += ["## Documents rendered from known text", "",
-                "Mean character error rate of a local vision model's transcription against the true text.", "",
-                table(["arm", "CER"], [[a, f"{v:.3f}"] for a, v in sorted(docs.items(), key=lambda kv: kv[1])]), ""]
     text = "\n".join(out)
     Path("results/lossy/worth.md").write_text(text)
     print(text)
