@@ -28,9 +28,9 @@ MCP endpoint: `http://localhost:8000/mcp/mcp`. The client and sweep scripts are 
 | Variable | Default | Meaning |
 |---|---|---|
 | `BIRD_SQLITE_ROOT` | none | folder holding `dev_databases/<db>/<db>.sqlite` (BIRD and Spider layout) |
-| `PARQUET_COMPRESSION` | `snappy` | Parquet codec |
+| `PARQUET_COMPRESSION` | `zstd` | Parquet codec (`snappy` was the default before the zstd comparison in REPORT.md) |
 | `PARQUET_ENCODING_STRATEGY` | `default` | `data_driven` picks per-column encodings (the paper's setting) |
-| `ARROW_IPC_COMPRESSION` | `none` | `none`, `lz4` or `zstd` |
+| `ARROW_IPC_COMPRESSION` | `zstd` | `none`, `lz4` or `zstd`; a reader needs zstd support in its Arrow build (pyarrow has it) |
 | `FORMAT_SELECT_TARGET` | `min_latency` | `min_bytes`, `min_latency` or `min_time_to_first_rows` |
 | `FORMAT_LATENCY_NETWORK_MBPS` | `0` | link rate the latency target assumes; at 0 it falls back to bytes |
 | `SQLITE_QUERY_TIMEOUT_S` | `30` | queries slower than this are interrupted |

@@ -30,6 +30,34 @@ def p95(values):
     return values[min(len(values) - 1, int(0.95 * len(values)))]
 
 
+TPCDS_LINKS = [("localhost", None), ("LAN 1 Gbit", 1000.0), ("WAN 50 Mbit", 50.0), ("cellular 10 Mbit", 10.0)]
+
+
+def tpcds_section():
+    """TPC-DS measured on localhost; slower links add bytes / bandwidth (modelled, no round trips) to each latency."""
+    paths = {c: D / f"tpcds_{c}.csv" for c, _ in CONFIGS}
+    if not all(p.exists() for p in paths.values()):
+        return ""
+    loaded = {c: {(r["n_rows"], r["n_cols"], r["strategy"]): r for r in load(p)} for c, p in paths.items()}
+    keys = sorted(set.intersection(*(set(v) for v in loaded.values())))
+    rows = []
+    for strategy in sorted({k[2] for k in keys}):
+        if strategy == "fixed:json":
+            continue
+        sel = [k for k in keys if k[2] == strategy]
+        cells = []
+        for link, mbps in TPCDS_LINKS:
+            tot = []
+            for c, _ in CONFIGS:
+                tot.append(sum(float(loaded[c][k]["latency_s"]) + (int(loaded[c][k]["bytes"]) * 8 / (mbps * 1e6) if mbps else 0) for k in sel))
+            cells.append(f"{tot[0]:.1f} / {tot[1]:.1f} ({tot[1] / tot[0]:.2f}x)")
+        mb = [sum(int(loaded[c][k]["bytes"]) for k in sel) / 1e6 for c, _ in CONFIGS]
+        rows.append([strategy, len(sel), f"{mb[0]:.0f} / {mb[1]:.0f}", *cells])
+    header = ["strategy", "grid cells", "MB (snappy/none / zstd/zstd)", *[f"{n}: total s (snappy/none / zstd/zstd)" for n, _ in TPCDS_LINKS]]
+    out = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)] + ["| " + " | ".join(map(str, r)) + " |" for r in rows]
+    return "\n## TPC-DS catalog_sales (localhost measured, slower links modelled)\n\n" + "\n".join(out) + "\n"
+
+
 def main():
     rows = []
     for link, label, tag in LINKS:
@@ -55,8 +83,8 @@ def main():
                          f"{b0:.1f}", f"{b1:.1f}", f"{b1 / b0:.2f}x"])
     header = ["link", "queries", "strategy", "total s (snappy/none)", "total s (zstd/zstd)", "ratio", "p95 s (snappy/none)",
               "p95 s (zstd/zstd)", "MB (snappy/none)", "MB (zstd/zstd)", "ratio"]
-    out = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)] + ["| " + " | ".join(r) + " |" for r in rows]
-    text = "# Table codec defaults: snappy/none vs zstd/zstd\n\n" + "\n".join(out) + "\n"
+    out = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)] + ["| " + " | ".join(map(str, r)) + " |" for r in rows]
+    text = "# Table codec defaults: snappy/none vs zstd/zstd\n\n" + "\n".join(out) + "\n" + tpcds_section()
     (D / "defaults.md").write_text(text)
     print(text)
 

@@ -651,9 +651,9 @@ VALID_ENCODING_STRATEGIES = {"default", "data_driven"}
 
 
 def _get_default_compression() -> str:
-    """Read PARQUET_COMPRESSION env var; default 'snappy'."""
-    raw = os.environ.get("PARQUET_COMPRESSION", "snappy").strip().lower()
-    return raw if raw in VALID_COMPRESSIONS else "snappy"
+    """Read PARQUET_COMPRESSION env var; default 'zstd'."""
+    raw = os.environ.get("PARQUET_COMPRESSION", "zstd").strip().lower()
+    return raw if raw in VALID_COMPRESSIONS else "zstd"
 
 
 def _get_default_encoding_strategy() -> str:
@@ -673,9 +673,9 @@ VALID_ARROW_IPC_COMPRESSIONS = {"none", "lz4", "zstd"}
 
 
 def _get_default_arrow_ipc_compression() -> str:
-    """Read ARROW_IPC_COMPRESSION env var; default 'none'."""
-    raw = os.environ.get("ARROW_IPC_COMPRESSION", "none").strip().lower()
-    return raw if raw in VALID_ARROW_IPC_COMPRESSIONS else "none"
+    """Read ARROW_IPC_COMPRESSION env var; default 'zstd'."""
+    raw = os.environ.get("ARROW_IPC_COMPRESSION", "zstd").strip().lower()
+    return raw if raw in VALID_ARROW_IPC_COMPRESSIONS else "zstd"
 
 
 def _encode_arrow_ipc_file(table: pa.Table, ipc_compression: str) -> bytes:

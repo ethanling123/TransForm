@@ -2,6 +2,8 @@
 
 The golden file was written before the arm registry existed (python tests/golden_arm_bytes.py --write regenerates it).
 Parquet and Arrow bytes depend on the pyarrow version; regenerate only after checking that a difference is the library.
+The codecs are pinned to the server's earlier defaults (snappy, uncompressed Arrow) so changing the defaults does not
+change what the fixture serves.
 """
 
 from __future__ import annotations
@@ -17,6 +19,8 @@ from pathlib import Path
 
 _SCRATCH = tempfile.mkdtemp(prefix="transform-golden-")
 os.environ.setdefault("TRANSFORM_SCRATCH_DIR", _SCRATCH)
+os.environ["PARQUET_COMPRESSION"] = "snappy"
+os.environ["ARROW_IPC_COMPRESSION"] = "none"
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.chdir(_SCRATCH)
 
