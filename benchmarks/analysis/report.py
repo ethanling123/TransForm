@@ -306,6 +306,7 @@ def main():
     cost_model = generated_block("payloads/cost_model.md")
     run_module("benchmarks.analysis.defaults")
     defaults = generated_block("defaults/defaults.md")
+    cost_aware = generated_block("payloads_cost_aware/summary.md")
 
     text = f"""# TransForm: Python server restoration, results and benchmark checks
 
@@ -479,6 +480,20 @@ codecs, so the default also changes what it picks.
 
 {defaults}
 
+### 13. Cost-aware selector: measured on the server (experimental branch)
+
+The policy of section 11 implemented in the Python server (`python-server/cost_model.py`, enabled with
+`FORMAT_COST_AWARE=1`, `min_latency` target only). With a known link speed it compresses and writes nothing to choose:
+it sends raw without sampling when even zero remaining bytes would save less transfer time than the cheapest codec costs,
+samples zstd first and stops there if zstd alone does not beat raw, and otherwise scores sampled sizes as compute time plus
+bytes / bandwidth. Codec speeds come from a one-off startup microbenchmark; the server's decompression time stands in for
+the client's. The same payload sweep as section 8 was run on each link, with every forced arm rerun in the same run
+as the baseline. The localhost run is told the link is 20 Gbit/s (the replay's assumption); with no link speed the flag
+falls back to the legacy behaviour. The ~1.3x that remains on localhost images is the one real tool call, which the
+forced arms replace with a cheaper ping.
+
+{cost_aware}
+
 ## Findings
 
 - On every dataset here the selector sends the fewest bytes of any strategy (tied with always-Parquet on TPC-DS, where it
@@ -524,6 +539,10 @@ codecs, so the default also changes what it picks.
   the best fixed arm (zstd, or brotli for audio): it is 0.00x to 0.08x slower because it pays for the estimate, so the
   gain is avoiding the fast-link losses. A wrong link-speed estimate (0.25x or 4x) moved the sampled policy's regret by
   at most 0.12x in any cell.
+- **Cost-aware selector, measured (section 13, experimental branch).** On the server the policy cut the selector's
+  regret on localhost from 4.1x, 24.7x and 10.3x (images, audio, text) to 1.3x, 1.3x and 1.05x, and the tool call's time
+  spent choosing from 14 to 116 ms down to 2 to 3 ms. On WAN and cellular it is within 1.00x to 1.05x of the best forced
+  arm. On a LAN it is 1.08x to 1.45x (text pays for sampling gzip and brotli on top of zstd).
 - **Table codec defaults (section 12).** zstd for Parquet and Arrow IPC cuts bytes 13% to 40% (Parquet) and 74% to 91%
   (Arrow IPC) on BIRD, with total latency within 4% on localhost, LAN and WAN for the typical query. On BIRD results above
   50K cells over cellular, Arrow IPC went from 19.0 s to 5.2 s (5 queries). On TPC-DS the min_bytes and min_latency selector's total latency

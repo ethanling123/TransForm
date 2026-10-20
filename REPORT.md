@@ -670,23 +670,23 @@ time (a lower bound), "sampled" extrapolates sizes from the first 256 KB and cha
 
 Latency totals divided by the per-payload oracle (the best of the four arms, measured). 1.00x is perfect. `selector` rows are what the current server selector did in the run, hint computation included. See the module docstring for what each cost-aware variant is charged.
 
-| link | kind (n) | oracle total (s) | free exact sizes | exact+hints | sampled | sampled+fast skip | selector min_bytes | selector min_latency | best fixed arm |
-|---|---|---|---|---|---|---|---|---|---|
-| localhost | image (212) | 0.94 | 1.00x | 3.77x | 1.87x | 1.00x | 4.07x | 4.11x | 1.00x (raw) |
-| localhost | audio (14) | 0.08 | 1.00x | 19.66x | 2.33x | 1.00x | 21.31x | 21.72x | 1.00x (raw) |
-| localhost | text (8) | 0.06 | 1.02x | 10.80x | 1.75x | 1.02x | 10.60x | 10.76x | 1.02x (raw) |
-| lan | image (24) | 0.41 | 1.03x | 1.62x | 1.24x | 1.03x | 1.62x | 1.57x | 1.03x (raw) |
-| lan | audio (14) | 0.41 | 1.06x | 4.75x | 1.28x | 1.00x | 4.93x | 4.92x | 1.00x (raw) |
-| lan | text (8) | 0.13 | 1.00x | 5.18x | 1.31x | 2.60x | 5.02x | 5.01x | 1.03x (zstd) |
-| wan | image (24) | 8.71 | 1.03x | 1.09x | 1.04x | 1.04x | 1.06x | 1.05x | 1.01x (zstd) |
-| wan | audio (14) | 7.78 | 1.06x | 1.28x | 1.08x | 1.08x | 1.21x | 1.21x | 1.00x (zstd) |
-| wan | text (8) | 2.02 | 1.01x | 1.33x | 1.03x | 1.03x | 1.28x | 1.29x | 1.00x (zstd) |
-| cellular | image (24) | 30.11 | 1.02x | 1.04x | 1.02x | 1.02x | 1.03x | 1.03x | 1.01x (zstd) |
-| cellular | audio (14) | 30.02 | 1.01x | 1.08x | 1.02x | 1.02x | 1.05x | 1.05x | 1.01x (brotli) |
-| cellular | text (8) | 5.21 | 1.01x | 1.14x | 1.03x | 1.03x | 1.13x | 1.10x | 1.01x (zstd) |
-| badwifi | image (24) | 47.13 | 1.01x | 1.02x | 1.01x | 1.01x | 1.02x | 1.01x | 1.01x (zstd) |
-| badwifi | audio (14) | 51.73 | 1.00x | 1.04x | 1.00x | 1.00x | 1.02x | 1.03x | 1.00x (brotli) |
-| badwifi | text (8) | 5.93 | 1.02x | 1.12x | 1.04x | 1.04x | 1.07x | 1.08x | 1.01x (zstd) |
+| link | kind (n) | oracle total (s) | free exact sizes | exact+hints | sampled | sampled+fast skip | sampled+break-even | sampled+staged | selector min_bytes | selector min_latency | best fixed arm |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| localhost | image (212) | 0.94 | 1.00x | 3.77x | 1.81x | 1.00x | 1.00x | 1.00x | 4.07x | 4.11x | 1.00x (raw) |
+| localhost | audio (14) | 0.08 | 1.00x | 19.66x | 2.25x | 1.00x | 1.00x | 1.00x | 21.31x | 21.72x | 1.00x (raw) |
+| localhost | text (8) | 0.06 | 1.02x | 10.80x | 1.77x | 1.02x | 1.02x | 1.02x | 10.60x | 10.76x | 1.02x (raw) |
+| lan | image (24) | 0.41 | 1.03x | 1.62x | 1.22x | 1.03x | 1.18x | 1.04x | 1.62x | 1.57x | 1.03x (raw) |
+| lan | audio (14) | 0.41 | 1.06x | 4.75x | 1.27x | 1.00x | 1.27x | 1.01x | 4.93x | 4.92x | 1.00x (raw) |
+| lan | text (8) | 0.13 | 1.00x | 5.18x | 1.31x | 2.60x | 1.20x | 1.19x | 5.02x | 5.01x | 1.03x (zstd) |
+| wan | image (24) | 8.71 | 1.03x | 1.09x | 1.04x | 1.04x | 1.04x | 1.03x | 1.06x | 1.05x | 1.01x (zstd) |
+| wan | audio (14) | 7.78 | 1.06x | 1.28x | 1.08x | 1.08x | 1.08x | 1.08x | 1.21x | 1.21x | 1.00x (zstd) |
+| wan | text (8) | 2.02 | 1.01x | 1.33x | 1.04x | 1.04x | 1.04x | 1.04x | 1.28x | 1.29x | 1.00x (zstd) |
+| cellular | image (24) | 30.11 | 1.02x | 1.04x | 1.02x | 1.02x | 1.02x | 1.02x | 1.03x | 1.03x | 1.01x (zstd) |
+| cellular | audio (14) | 30.02 | 1.01x | 1.08x | 1.02x | 1.02x | 1.02x | 1.02x | 1.05x | 1.05x | 1.01x (brotli) |
+| cellular | text (8) | 5.21 | 1.01x | 1.14x | 1.03x | 1.03x | 1.03x | 1.03x | 1.13x | 1.10x | 1.01x (zstd) |
+| badwifi | image (24) | 47.13 | 1.01x | 1.02x | 1.01x | 1.01x | 1.01x | 1.01x | 1.02x | 1.01x | 1.01x (zstd) |
+| badwifi | audio (14) | 51.73 | 1.00x | 1.04x | 1.00x | 1.00x | 1.00x | 1.00x | 1.02x | 1.03x | 1.00x (brotli) |
+| badwifi | text (8) | 5.93 | 1.02x | 1.12x | 1.04x | 1.04x | 1.04x | 1.04x | 1.07x | 1.08x | 1.01x (zstd) |
 
 #### Arms picked by the sampled variant
 
@@ -708,25 +708,25 @@ Latency totals divided by the per-payload oracle (the best of the four arms, mea
 | badwifi | audio | brotli: 14 |
 | badwifi | text | brotli: 8 |
 
-#### Sampled variant when the believed link speed is wrong (regret vs oracle)
+#### Staged variant when the believed link speed is wrong (regret vs oracle)
 
 | link | kind | believed 0.25x | believed 1x | believed 4x |
 |---|---|---|---|---|
-| localhost | image | 1.87x | 1.87x | 1.87x |
-| localhost | audio | 2.33x | 2.33x | 2.33x |
-| localhost | text | 1.84x | 1.75x | 1.75x |
-| lan | image | 1.25x | 1.24x | 1.24x |
-| lan | audio | 1.40x | 1.28x | 1.27x |
-| lan | text | 1.31x | 1.31x | 1.38x |
-| wan | image | 1.04x | 1.04x | 1.04x |
+| localhost | image | 1.00x | 1.00x | 1.00x |
+| localhost | audio | 1.00x | 1.00x | 1.00x |
+| localhost | text | 1.02x | 1.02x | 1.02x |
+| lan | image | 1.06x | 1.04x | 1.03x |
+| lan | audio | 1.14x | 1.01x | 1.00x |
+| lan | text | 1.29x | 1.19x | 2.60x |
+| wan | image | 1.03x | 1.03x | 1.03x |
 | wan | audio | 1.08x | 1.08x | 1.02x |
-| wan | text | 1.10x | 1.03x | 1.02x |
-| cellular | image | 1.01x | 1.02x | 1.03x |
+| wan | text | 1.10x | 1.04x | 1.02x |
+| cellular | image | 1.02x | 1.02x | 1.02x |
 | cellular | audio | 1.02x | 1.02x | 1.02x |
 | cellular | text | 1.03x | 1.03x | 1.01x |
 | badwifi | image | 1.01x | 1.01x | 1.01x |
 | badwifi | audio | 1.01x | 1.00x | 1.00x |
-| badwifi | text | 1.04x | 1.04x | 1.04x |
+| badwifi | text | 1.04x | 1.04x | 1.05x |
 
 ### 12. Table codec defaults: snappy / none against zstd / zstd
 
@@ -778,6 +778,35 @@ codecs, so the default also changes what it picks.
 | selector:min_latency | 9 | 59 / 46 | 0.2 / 0.2 (0.86x) | 0.7 / 0.5 (0.80x) | 9.7 / 7.6 (0.78x) | 47.7 / 37.2 (0.78x) |
 | selector:min_time_to_first_rows | 9 | 64 / 48 | 10.0 / 9.3 (0.93x) | 10.5 / 9.7 (0.92x) | 20.2 / 16.9 (0.84x) | 61.1 / 47.4 (0.78x) |
 
+### 13. Cost-aware selector: measured on the server (experimental branch)
+
+The policy of section 11 implemented in the Python server (`python-server/cost_model.py`, enabled with
+`FORMAT_COST_AWARE=1`, `min_latency` target only). With a known link speed it compresses and writes nothing to choose:
+it sends raw without sampling when even zero remaining bytes would save less transfer time than the cheapest codec costs,
+samples zstd first and stops there if zstd alone does not beat raw, and otherwise scores sampled sizes as compute time plus
+bytes / bandwidth. Codec speeds come from a one-off startup microbenchmark; the server's decompression time stands in for
+the client's. The same payload sweep as section 8 was run on each link, with every forced arm rerun in the same run
+as the baseline. The localhost run is told the link is 20 Gbit/s (the replay's assumption); with no link speed the flag
+falls back to the legacy behaviour. The ~1.3x that remains on localhost images is the one real tool call, which the
+forced arms replace with a cheaper ping.
+
+Regret = total latency / total of the best forced arm per payload, same run. `legacy min_latency` is the selector without the flag (results/payloads/); `cost-aware min_latency` is the flagged run. `select_s` is the mean time the tool call spent choosing.
+
+| link | kind (n) | legacy min_latency | cost-aware min_latency | best fixed arm | cost-aware picks | legacy select_s | cost-aware select_s | round trips ok |
+|---|---|---|---|---|---|---|---|---|
+| localhost | image (212) | 4.13x | 1.31x | 1.03x (raw) | raw_blob: 212 | 14 ms | 3 ms | yes |
+| localhost | audio (14) | 24.66x | 1.29x | 1.00x (raw) | raw_blob: 14 | 116 ms | 2 ms | yes |
+| localhost | text (8) | 10.27x | 1.05x | 1.00x (raw) | raw_blob: 6, text_inline: 2 | 72 ms | 2 ms | yes |
+| lan | image (24) | 1.56x | 1.43x | 1.03x (raw) | raw_blob: 24 | 14 ms | 12 ms | yes |
+| lan | audio (14) | 4.95x | 1.08x | 1.00x (raw) | raw_blob: 12, zstd_blob: 2 | 113 ms | 6 ms | yes |
+| lan | text (8) | 5.05x | 1.45x | 1.00x (zstd) | zstd_blob: 8 | 75 ms | 12 ms | yes |
+| wan | image (24) | 1.06x | 1.03x | 1.01x (zstd) | raw_blob: 19, zstd_blob: 5 | 111 ms | 100 ms | yes |
+| wan | audio (14) | 1.22x | 1.00x | 1.00x (zstd) | zstd_blob: 14 | 219 ms | 98 ms | yes |
+| wan | text (8) | 1.32x | 1.05x | 1.00x (zstd) | brotli_blob: 1, zstd_blob: 7 | 175 ms | 100 ms | yes |
+| cellular | image (24) | 1.03x | 1.02x | 1.01x (zstd) | brotli_blob: 2, raw_blob: 18, zstd_blob: 4 | 199 ms | 182 ms | yes |
+| cellular | audio (14) | 1.05x | 1.02x | 1.00x (zstd) | brotli_blob: 14 | 304 ms | 188 ms | yes |
+| cellular | text (8) | 1.11x | 1.04x | 1.05x (brotli) | brotli_blob: 6, zstd_blob: 2 | 260 ms | 185 ms | yes |
+
 ## Findings
 
 - On every dataset here the selector sends the fewest bytes of any strategy (tied with always-Parquet on TPC-DS, where it
@@ -826,6 +855,10 @@ codecs, so the default also changes what it picks.
   the best fixed arm (zstd, or brotli for audio): it is 0.00x to 0.08x slower because it pays for the estimate, so the
   gain is avoiding the fast-link losses. A wrong link-speed estimate (0.25x or 4x) moved the sampled policy's regret by
   at most 0.12x in any cell.
+- **Cost-aware selector, measured (section 13, experimental branch).** On the server the policy cut the selector's
+  regret on localhost from 4.1x, 24.7x and 10.3x (images, audio, text) to 1.3x, 1.3x and 1.05x, and the tool call's time
+  spent choosing from 14 to 116 ms down to 2 to 3 ms. On WAN and cellular it is within 1.00x to 1.05x of the best forced
+  arm. On a LAN it is 1.08x to 1.45x (text pays for sampling gzip and brotli on top of zstd).
 - **Table codec defaults (section 12).** zstd for Parquet and Arrow IPC cuts bytes 13% to 40% (Parquet) and 74% to 91%
   (Arrow IPC) on BIRD, with total latency within 4% on localhost, LAN and WAN for the typical query. On BIRD results above
   50K cells over cellular, Arrow IPC went from 19.0 s to 5.2 s (5 queries). On TPC-DS the min_bytes and min_latency selector's total latency
