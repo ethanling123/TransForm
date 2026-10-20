@@ -6,8 +6,10 @@ This module lets the server decide with less work:
 1. Break-even: if sending the payload with zero bytes left would still save less transfer time than the cheapest
    codec's compress-plus-decompress time, no codec can win, so the payload goes raw and is never sampled.
 2. Staged sampling: otherwise compress the first 256 KB with zstd (the cheapest codec to sample); if zstd alone does not
-   beat sending raw, go raw. Only then sample gzip and brotli.
-3. The selector scores each arm as compute time + bytes / bandwidth, using the sampled sizes extrapolated to the payload.
+   beat sending raw, go raw.
+3. Only then sample gzip and brotli, and only those that could still beat zstd: a codec that takes longer than zstd
+   by more than zstd's whole transfer time cannot win even if it shrank the payload to nothing.
+4. The selector scores each arm as compute time + bytes / bandwidth, using the sampled sizes extrapolated to the payload.
 
 Compute speeds come from a one-off microbenchmark of the codecs at the levels the server serves. Decompression speed
 on the server stands in for the client's, which is not measured.
@@ -92,12 +94,20 @@ def estimate_hints(read_sample: Callable[[], bytes], raw_bytes: int, mbps: float
         hints["stage"] = "break_even_skip"
         return hints
     sample = read_sample()
-    for position, arm in enumerate(SAMPLE_ORDER):
-        packed = CODECS[arm][0](sample)
-        estimate = int(round(len(packed) * raw_bytes / len(sample)))
-        hints[{"zstd_blob": "zstd_bytes", "gzip_blob": "gzip_bytes", "brotli_blob": "brotli_bytes"}[arm]] = estimate
-        if position == 0 and compute[arm] + estimate * 8.0 / (mbps * 1e6) >= transfer_raw_s:
-            hints.update(stage="zstd_not_worth", zstd_bytes=None)
-            return hints
-    hints["stage"] = "sampled"
+    keys = {"zstd_blob": "zstd_bytes", "gzip_blob": "gzip_bytes", "brotli_blob": "brotli_bytes"}
+
+    def estimate(arm: str) -> int:
+        return int(round(len(CODECS[arm][0](sample)) * raw_bytes / len(sample)))
+
+    zstd_estimate = estimate("zstd_blob")
+    zstd_transfer_s = zstd_estimate * 8.0 / (mbps * 1e6)
+    if compute["zstd_blob"] + zstd_transfer_s >= transfer_raw_s:
+        hints["stage"] = "zstd_not_worth"
+        return hints
+    hints[keys["zstd_blob"]] = zstd_estimate
+    hints["stage"] = "zstd_dominates"
+    for arm in SAMPLE_ORDER[1:]:
+        if compute[arm] - compute["zstd_blob"] < zstd_transfer_s:
+            hints[keys[arm]] = estimate(arm)
+            hints["stage"] = "sampled"
     return hints

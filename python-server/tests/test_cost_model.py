@@ -66,6 +66,13 @@ class CostModel(unittest.TestCase):
         self.assertIsNone(hints["gzip_bytes"])
         self.assertIsNone(hints["brotli_bytes"])
 
+    def test_a_fast_link_only_samples_zstd_because_nothing_slower_can_win(self):
+        hints = cost_model.estimate_hints(lambda: TEXT[:cost_model.SAMPLE_BYTES], len(TEXT), mbps=1000)
+        self.assertEqual(hints["stage"], "zstd_dominates")
+        self.assertLess(hints["zstd_bytes"], len(TEXT))
+        self.assertIsNone(hints["gzip_bytes"])
+        self.assertIsNone(hints["brotli_bytes"])
+
     def test_compressible_data_on_a_slow_link_samples_every_codec(self):
         hints = cost_model.estimate_hints(lambda: TEXT[:cost_model.SAMPLE_BYTES], len(TEXT), mbps=10)
         self.assertEqual(hints["stage"], "sampled")

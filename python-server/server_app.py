@@ -88,6 +88,9 @@ from format_mab import (  # noqa: E402
 )
 from hint_reference_table import HintStore  # noqa: E402
 
+if cost_model.enabled():
+    cost_model.calibrate()  # a fraction of a second; done here so the first request does not pay for it
+
 
 @dataclass
 class ResultConfig:
