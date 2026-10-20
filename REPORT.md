@@ -787,25 +787,25 @@ samples zstd first and stops there if zstd alone does not beat raw, and otherwis
 bytes / bandwidth. Codec speeds come from a one-off startup microbenchmark; the server's decompression time stands in for
 the client's. The same payload sweep as section 8 was run on each link, with every forced arm rerun in the same run
 as the baseline. The localhost run is told the link is 20 Gbit/s (the replay's assumption); with no link speed the flag
-falls back to the legacy behaviour. The ~1.3x that remains on localhost images is the one real tool call, which the
-forced arms replace with a cheaper ping.
+falls back to the legacy behaviour. Localhost totals are tens to hundreds of milliseconds, so ratios there carry
+noise of the same size as the differences between arms.
 
 Regret = total latency / total of the best forced arm per payload, same run. `legacy min_latency` is the selector without the flag (results/payloads/); `cost-aware min_latency` is the flagged run. `select_s` is the mean time the tool call spent choosing.
 
 | link | kind (n) | legacy min_latency | cost-aware min_latency | best fixed arm | cost-aware picks | legacy select_s | cost-aware select_s | round trips ok |
 |---|---|---|---|---|---|---|---|---|
-| localhost | image (212) | 4.13x | 1.31x | 1.03x (raw) | raw_blob: 212 | 14 ms | 3 ms | yes |
-| localhost | audio (14) | 24.66x | 1.29x | 1.00x (raw) | raw_blob: 14 | 116 ms | 2 ms | yes |
-| localhost | text (8) | 10.27x | 1.05x | 1.00x (raw) | raw_blob: 6, text_inline: 2 | 72 ms | 2 ms | yes |
-| lan | image (24) | 1.56x | 1.43x | 1.03x (raw) | raw_blob: 24 | 14 ms | 12 ms | yes |
-| lan | audio (14) | 4.95x | 1.08x | 1.00x (raw) | raw_blob: 12, zstd_blob: 2 | 113 ms | 6 ms | yes |
-| lan | text (8) | 5.05x | 1.45x | 1.00x (zstd) | zstd_blob: 8 | 75 ms | 12 ms | yes |
-| wan | image (24) | 1.06x | 1.03x | 1.01x (zstd) | raw_blob: 19, zstd_blob: 5 | 111 ms | 100 ms | yes |
-| wan | audio (14) | 1.22x | 1.00x | 1.00x (zstd) | zstd_blob: 14 | 219 ms | 98 ms | yes |
-| wan | text (8) | 1.32x | 1.05x | 1.00x (zstd) | brotli_blob: 1, zstd_blob: 7 | 175 ms | 100 ms | yes |
-| cellular | image (24) | 1.03x | 1.02x | 1.01x (zstd) | brotli_blob: 2, raw_blob: 18, zstd_blob: 4 | 199 ms | 182 ms | yes |
-| cellular | audio (14) | 1.05x | 1.02x | 1.00x (zstd) | brotli_blob: 14 | 304 ms | 188 ms | yes |
-| cellular | text (8) | 1.11x | 1.04x | 1.05x (brotli) | brotli_blob: 6, zstd_blob: 2 | 260 ms | 185 ms | yes |
+| localhost | image (212) | 4.07x | 1.17x | 1.13x (raw) | raw_blob: 212 | 14 ms | 2 ms | yes |
+| localhost | audio (14) | 22.04x | 1.58x | 1.00x (raw) | raw_blob: 14 | 116 ms | 2 ms | yes |
+| localhost | text (8) | 9.35x | 0.88x | 1.09x (raw) | raw_blob: 6, text_inline: 2 | 72 ms | 2 ms | yes |
+| lan | image (24) | 1.62x | 1.11x | 1.03x (raw) | raw_blob: 24 | 14 ms | 6 ms | yes |
+| lan | audio (14) | 5.04x | 1.07x | 1.00x (raw) | raw_blob: 12, zstd_blob: 2 | 113 ms | 6 ms | yes |
+| lan | text (8) | 5.11x | 1.06x | 1.00x (zstd) | zstd_blob: 8 | 75 ms | 5 ms | yes |
+| wan | image (24) | 1.07x | 1.02x | 1.02x (zstd) | raw_blob: 19, zstd_blob: 5 | 111 ms | 93 ms | yes |
+| wan | audio (14) | 1.22x | 1.01x | 1.00x (zstd) | zstd_blob: 14 | 219 ms | 100 ms | yes |
+| wan | text (8) | 1.31x | 1.03x | 1.00x (zstd) | zstd_blob: 8 | 175 ms | 95 ms | yes |
+| cellular | image (24) | 1.03x | 1.01x | 1.01x (zstd) | brotli_blob: 1, raw_blob: 18, zstd_blob: 5 | 199 ms | 175 ms | yes |
+| cellular | audio (14) | 1.05x | 1.02x | 1.00x (brotli) | brotli_blob: 14 | 304 ms | 186 ms | yes |
+| cellular | text (8) | 1.13x | 1.02x | 1.02x (brotli) | brotli_blob: 6, zstd_blob: 2 | 260 ms | 179 ms | yes |
 
 ## Findings
 
@@ -856,9 +856,12 @@ Regret = total latency / total of the best forced arm per payload, same run. `le
   gain is avoiding the fast-link losses. A wrong link-speed estimate (0.25x or 4x) moved the sampled policy's regret by
   at most 0.12x in any cell.
 - **Cost-aware selector, measured (section 13, experimental branch).** On the server the policy cut the selector's
-  regret on localhost from 4.1x, 24.7x and 10.3x (images, audio, text) to 1.3x, 1.3x and 1.05x, and the tool call's time
-  spent choosing from 14 to 116 ms down to 2 to 3 ms. On WAN and cellular it is within 1.00x to 1.05x of the best forced
-  arm. On a LAN it is 1.08x to 1.45x (text pays for sampling gzip and brotli on top of zstd).
+  regret on LAN from 1.6x, 5.0x and 5.1x (images, audio, text) to 1.11x, 1.07x and 1.06x, and the time its tool call
+  spends choosing from 14 to 113 ms down to 5 to 6 ms. On WAN and cellular it is within 1.01x to 1.03x of the best forced
+  arm. On localhost it went from 4.1x, 22x and 9.4x to 1.2x, 1.6x and 0.9x; those totals are 0.06 to 0.9 s, so the
+  residual is within run-to-run noise (the text figure is below the best fixed arm). Two causes of overhead were found
+  and fixed: the codec calibration ran on the first request (about 0.17 s) and gzip and brotli were sampled on a LAN
+  where they cannot beat zstd. A first version without those fixes measured 1.43x and 1.45x on LAN images and text.
 - **Table codec defaults (section 12).** zstd for Parquet and Arrow IPC cuts bytes 13% to 40% (Parquet) and 74% to 91%
   (Arrow IPC) on BIRD, with total latency within 4% on localhost, LAN and WAN for the typical query. On BIRD results above
   50K cells over cellular, Arrow IPC went from 19.0 s to 5.2 s (5 queries). On TPC-DS the min_bytes and min_latency selector's total latency

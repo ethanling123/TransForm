@@ -489,8 +489,8 @@ samples zstd first and stops there if zstd alone does not beat raw, and otherwis
 bytes / bandwidth. Codec speeds come from a one-off startup microbenchmark; the server's decompression time stands in for
 the client's. The same payload sweep as section 8 was run on each link, with every forced arm rerun in the same run
 as the baseline. The localhost run is told the link is 20 Gbit/s (the replay's assumption); with no link speed the flag
-falls back to the legacy behaviour. The ~1.3x that remains on localhost images is the one real tool call, which the
-forced arms replace with a cheaper ping.
+falls back to the legacy behaviour. Localhost totals are tens to hundreds of milliseconds, so ratios there carry
+noise of the same size as the differences between arms.
 
 {cost_aware}
 
@@ -540,9 +540,12 @@ forced arms replace with a cheaper ping.
   gain is avoiding the fast-link losses. A wrong link-speed estimate (0.25x or 4x) moved the sampled policy's regret by
   at most 0.12x in any cell.
 - **Cost-aware selector, measured (section 13, experimental branch).** On the server the policy cut the selector's
-  regret on localhost from 4.1x, 24.7x and 10.3x (images, audio, text) to 1.3x, 1.3x and 1.05x, and the tool call's time
-  spent choosing from 14 to 116 ms down to 2 to 3 ms. On WAN and cellular it is within 1.00x to 1.05x of the best forced
-  arm. On a LAN it is 1.08x to 1.45x (text pays for sampling gzip and brotli on top of zstd).
+  regret on LAN from 1.6x, 5.0x and 5.1x (images, audio, text) to 1.11x, 1.07x and 1.06x, and the time its tool call
+  spends choosing from 14 to 113 ms down to 5 to 6 ms. On WAN and cellular it is within 1.01x to 1.03x of the best forced
+  arm. On localhost it went from 4.1x, 22x and 9.4x to 1.2x, 1.6x and 0.9x; those totals are 0.06 to 0.9 s, so the
+  residual is within run-to-run noise (the text figure is below the best fixed arm). Two causes of overhead were found
+  and fixed: the codec calibration ran on the first request (about 0.17 s) and gzip and brotli were sampled on a LAN
+  where they cannot beat zstd. A first version without those fixes measured 1.43x and 1.45x on LAN images and text.
 - **Table codec defaults (section 12).** zstd for Parquet and Arrow IPC cuts bytes 13% to 40% (Parquet) and 74% to 91%
   (Arrow IPC) on BIRD, with total latency within 4% on localhost, LAN and WAN for the typical query. On BIRD results above
   50K cells over cellular, Arrow IPC went from 19.0 s to 5.2 s (5 queries). On TPC-DS the min_bytes and min_latency selector's total latency
