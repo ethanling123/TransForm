@@ -14,6 +14,10 @@ one measured when that arm was forced on that payload and link. The policy only 
   sampled sizes      sizes extrapolated from compressing only the first 256 KB at the server's codec levels, plus the
                      measured time that took
   sampled + fast skip  the sampled policy, except that a link of 1 Gbit/s or more skips sampling and sends raw
+  sampled + staged     sampled + break-even, but zstd (the cheapest codec to sample) is sampled first and the other
+                     codecs only when zstd on its own beats sending raw
+  sampled + break-even  the sampled policy, except that it sends raw without sampling when even perfect compression
+                     (sending zero bytes) would save less transfer time than the cheapest codec's compute time
 
 The sampled variant is also rerun with the link speed believed to be 0.25x and 4x the true one.
 
@@ -70,10 +74,12 @@ def sampled_estimates(data):
     """Wire-size estimate per arm from compressing only the first 256 KB, and what taking the sample cost in seconds."""
     sample = data[:SAMPLE_BYTES]
     wire = {"raw": len(data)}
-    t = time.perf_counter()
+    spent = {}
     for arm, compress in SAMPLE_CODECS.items():
+        t = time.perf_counter()
         wire[arm] = len(compress(sample)) * len(data) / len(sample)
-    return wire, time.perf_counter() - t
+        spent[arm] = time.perf_counter() - t
+    return wire, sum(spent.values()), spent
 
 
 def estimate_all(args):
@@ -105,13 +111,36 @@ def policy_totals(data, localhost, payloads, speed, variant, belief=1.0):
             extra = max(float(v["selector min_bytes"]["select_s"]) - floor, 0.0)
             sizes = exact
         elif variant == "sampled":
-            sizes, extra = ESTIMATES[p]
+            sizes, extra, _ = ESTIMATES[p]
+        elif variant == "sampled+break-even":
+            models = fit_compute(localhost, p)
+            floor = min(models[a][0] + models[a][1] * raw_bytes for a in ARMS if a != "raw")
+            if raw_bytes * 8 / (speed * belief * 1e6) <= floor:
+                total += float(v["raw"]["latency_s"])
+                picks["raw"] += 1
+                continue
+            sizes, extra, _ = ESTIMATES[p]
+        elif variant == "sampled+staged":
+            models = fit_compute(localhost, p)
+            floor = min(models[a][0] + models[a][1] * raw_bytes for a in ARMS if a != "raw")
+            if raw_bytes * 8 / (speed * belief * 1e6) <= floor:
+                total += float(v["raw"]["latency_s"])
+                picks["raw"] += 1
+                continue
+            sizes, _, spent = ESTIMATES[p]
+            a0, b0 = models["zstd"]
+            zstd_cost = a0 + b0 * raw_bytes + sizes["zstd"] * 8 / (speed * belief * 1e6)
+            if zstd_cost >= raw_bytes * 8 / (speed * belief * 1e6):
+                total += float(v["raw"]["latency_s"]) + spent["zstd"]
+                picks["raw"] += 1
+                continue
+            extra = sum(spent.values())
         elif variant == "sampled+fast skip":
             if speed >= FAST_LINK_MBPS:
                 total += float(v["raw"]["latency_s"])
                 picks["raw"] += 1
                 continue
-            sizes, extra = ESTIMATES[p]
+            sizes, extra, _ = ESTIMATES[p]
         else:
             sizes = exact
         pick = choose(fit_compute(localhost, p), sizes, raw_bytes, speed * belief)
@@ -137,10 +166,10 @@ def main():
             for target in ("min_bytes", "min_latency"):
                 totals[f"selector {target}"] = sum(float(data[p][f"selector {target}"]["latency_s"]) for p in payloads)
             picks = {}
-            for variant in ("free exact sizes", "exact+hints", "sampled", "sampled+fast skip"):
+            for variant in ("free exact sizes", "exact+hints", "sampled", "sampled+fast skip", "sampled+break-even", "sampled+staged"):
                 totals[variant], picks[variant] = policy_totals(data, localhost, payloads, speed, variant)
             for belief in BANDWIDTH_ERRORS:
-                t, _ = policy_totals(data, localhost, payloads, speed, "sampled", belief)
+                t, _ = policy_totals(data, localhost, payloads, speed, "sampled+staged", belief)
                 belief_rows.append((link, kind, belief, t / totals["oracle"]))
             rows.append((link, kind, len(payloads), totals, picks))
 
@@ -148,7 +177,7 @@ def main():
              "Latency totals divided by the per-payload oracle (the best of the four arms, measured). 1.00x is perfect. "
              "`selector` rows are what the current server selector did in the run, hint computation included. "
              "See the module docstring for what each cost-aware variant is charged.", ""]
-    cols = ["free exact sizes", "exact+hints", "sampled", "sampled+fast skip", "selector min_bytes", "selector min_latency"]
+    cols = ["free exact sizes", "exact+hints", "sampled", "sampled+fast skip", "sampled+break-even", "sampled+staged", "selector min_bytes", "selector min_latency"]
     lines += ["| link | kind (n) | oracle total (s) | " + " | ".join(cols) + " | best fixed arm |", "|" + "---|" * (len(cols) + 4)]
     for link, kind, n, totals, _ in rows:
         o = totals["oracle"]
@@ -160,7 +189,7 @@ def main():
     for link, kind, _, _, picks in rows:
         lines.append(f"| {link} | {kind} | " + ", ".join(f"{k}: {v}" for k, v in sorted(picks["sampled"].items())) + " |")
 
-    lines += ["", "## Sampled variant when the believed link speed is wrong (regret vs oracle)", "",
+    lines += ["", "## Staged variant when the believed link speed is wrong (regret vs oracle)", "",
               "| link | kind | believed 0.25x | believed 1x | believed 4x |", "|---|---|---|---|---|"]
     by = defaultdict(dict)
     for link, kind, belief, r in belief_rows:

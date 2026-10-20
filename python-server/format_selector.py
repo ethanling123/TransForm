@@ -265,15 +265,15 @@ def select_format_with_hints(context: SelectionContext, hints: HintsDict) -> For
         )
 
         def pick(cost) -> FormatName:
-            candidates: list[tuple[float, int, FormatName]] = [(cost(raw_bytes), 4, "raw_blob")]
+            candidates: list[tuple[float, int, FormatName]] = [(cost("raw_blob", raw_bytes), 4, "raw_blob")]
             for arm, key, rank in arms:
                 size = hints.get(key)
                 if size is not None:
-                    candidates.append((cost(int(size)), rank, arm))
+                    candidates.append((cost(arm, int(size)), rank, arm))
             return min(candidates, key=lambda t: (t[0], t[1]))[2]
 
         def min_unstructured_bytes() -> FormatName:
-            return pick(lambda n: n)
+            return pick(lambda arm, n: n)
 
         if context.target == OptimizationTarget.MIN_BYTES:
             return min_unstructured_bytes()
@@ -289,7 +289,9 @@ def select_format_with_hints(context: SelectionContext, hints: HintsDict) -> For
                 return float(num_bytes)
             return (num_bytes * 8.0) / (mbps * 1_000_000.0)
 
-        return pick(transfer_seconds)
+        # Cost-aware hints (cost_model.estimate_hints) add compress + decompress time to the transfer time.
+        compute_s = hints.get("compute_s") or {}
+        return pick(lambda arm, n: compute_s.get(arm, 0.0) + transfer_seconds(n))
 
     json_b = hints.get("json_bytes")
     parquet_b = hints.get("parquet_bytes")

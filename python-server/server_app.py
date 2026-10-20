@@ -71,10 +71,12 @@ from mcp.server.mcpserver import MCPServer  # type: ignore  # noqa: E402
 from mcp.types import CallToolResult, TextContent  # type: ignore  # noqa: E402
 
 import arms  # noqa: E402
+import cost_model  # noqa: E402
 from arms import REGISTRY  # noqa: E402
 from format_selector import (  # noqa: E402
     OptimizationTarget,
     SelectionContext,
+    _get_network_mbps,
     get_default_target,
     select_format_with_hints,
 )
@@ -1949,8 +1951,6 @@ def large_result_auto(
         if cfg is not None and cfg.payload_kind == "unstructured":
             if cfg.raw_path is None or not cfg.raw_path.is_file():
                 raise ValueError(f"Unstructured result_id missing file: {result_id}")
-            unstructured = _unstructured_hints(cfg, result_id)
-
             if optimization_target:
                 try:
                     sel_target = OptimizationTarget(optimization_target.strip().lower())
@@ -1958,6 +1958,10 @@ def large_result_auto(
                     sel_target = get_default_target()
             else:
                 sel_target = get_default_target()
+            # Sizes are estimated (not computed exactly) only when the target is latency, the link speed is known and
+            # no bandit is learning from exact sizes; min_bytes keeps exact sizes because it asks for the smallest payload.
+            cost_aware = cost_model.enabled() and sel_target == OptimizationTarget.MIN_LATENCY and not use_mab
+            unstructured = _unstructured_hints(cfg, result_id, cost_aware_mbps=_get_network_mbps() if cost_aware else 0.0)
             sel_ctx = SelectionContext(n_rows=0, n_cols=0, target=sel_target, prefer_streaming=prefer_streaming)
             hints: Dict[str, Any] = unstructured
             mab_state = load_mab_state(_SERVER_MAB_STATE_PATH) if use_mab else None
@@ -2906,8 +2910,11 @@ def _raw_codec_blob(cfg: "ResultConfig", result_id: str, arm: str) -> bytes:
     return path.read_bytes()
 
 
-def _unstructured_hints(cfg: "ResultConfig", result_id: str) -> Dict[str, Any]:
+def _unstructured_hints(cfg: "ResultConfig", result_id: str, cost_aware_mbps: float = 0.0) -> Dict[str, Any]:
     """Size of every unstructured arm, for the selector.
+
+    With cost_aware_mbps > 0 (FORMAT_COST_AWARE=1, min_latency, known link speed) the sizes are estimates from a
+    sample, nothing is compressed or written, and the hints carry per-arm compute times; see cost_model.py.
 
     Compressed sizes are exact. For payloads over 1 MB the first 256 KB is compressed first; if it barely
     shrinks (images, audio and other already-compressed media) the codec arms are left out so raw wins,
@@ -2922,6 +2929,14 @@ def _unstructured_hints(cfg: "ResultConfig", result_id: str) -> Dict[str, Any]:
         "text_inline_bytes": int(raw_bytes) if raw_bytes <= MAX_INLINE_TEXT_BYTES else None,
         "already_compressed": False,
     }
+    if cost_aware_mbps > 0:
+        if raw_bytes <= _json_obvious_winner_bytes():  # the selector returns tiny text inline without looking at sizes
+            return hints
+        def read_sample() -> bytes:
+            with open(cfg.raw_path, "rb") as f:
+                return f.read(cost_model.SAMPLE_BYTES)
+        hints.update(cost_model.estimate_hints(read_sample, raw_bytes, cost_aware_mbps))
+        return hints
     if raw_bytes > _SAMPLE_CHECK_ABOVE:
         sample = cfg.raw_path.read_bytes()[:_SAMPLE_BYTES]
         if len(_compress_raw(sample, "zstd", 1)) > _INCOMPRESSIBLE_RATIO * len(sample):
