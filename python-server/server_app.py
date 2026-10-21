@@ -2826,7 +2826,7 @@ async def parquet_blob_endpoint(request) -> Response:
         "X-Benchmark-Encoding-Strategy": enc_strat,
     }
 
-    return _with_ranges(request, data, "application/octet-stream", headers)
+    return _with_ranges(request, data, "application/octet-stream", headers, result_id)
 
 
 def _stream_parquet_chunks(config: ResultConfig):
@@ -2927,7 +2927,7 @@ async def ipc_blob_endpoint(request) -> Response:
         "X-Benchmark-IPC-Compression": ipc_comp,
     }
 
-    return _with_ranges(request, data, "application/vnd.apache.arrow.file", headers)
+    return _with_ranges(request, data, "application/vnd.apache.arrow.file", headers, result_id)
 
 
 def _stream_arrow_ipc_chunks(config: ResultConfig):
@@ -3006,16 +3006,17 @@ async def raw_blob_endpoint(request) -> Response:
         )
     data = config.raw_path.read_bytes()
     headers = {"X-Benchmark-Bytes": str(len(data))}
-    return _with_ranges(request, data, config.raw_mime_type or "application/octet-stream", headers)
+    return _with_ranges(request, data, config.raw_mime_type or "application/octet-stream", headers, result_id)
 
 
-def _with_ranges(request, data: bytes, media_type: str, headers: Dict[str, str]) -> Response:
-    """200 with the whole payload, 304 if `If-None-Match` names its digest, or 206 with the slice a single
+def _with_ranges(request, data: bytes, media_type: str, headers: Dict[str, str], handle: str) -> Response:
+    """200 with the whole payload, 304 if `If-None-Match` names its ETag, or 206 with the slice a single
     `Range: bytes=a-b` header asks for.
 
     A client can fetch several slices over separate connections; see benchmarks/netem_docker/quick.py --ranges.
     """
-    etag = '"sha256-' + hashlib.sha256(data).hexdigest()[:32] + '"'
+    # The bytes behind a handle never change, so the handle and the length identify them without hashing every response.
+    etag = f'"{handle}-{len(data)}"'
     headers = {**headers, "Accept-Ranges": "bytes", "ETag": etag}
     candidates = [t.strip() for t in request.headers.get("if-none-match", "").split(",")]
     if etag in candidates or "*" in candidates:  # the client already holds exactly these bytes
@@ -3252,7 +3253,8 @@ async def data_endpoint(request) -> Response:
     if isinstance(response, StreamingResponse):
         return response
     response.headers["X-Payload-Codec"] = response.headers.get("X-Payload-Codec") or str(_arm_codec(spec, cfg))
-    response.headers["X-Content-Digest"] = hashlib.sha256(response.body).hexdigest()
+    if response.status_code == 200:  # the digest is of the whole payload; a 206 slice or an empty 304 has none
+        response.headers["X-Content-Digest"] = hashlib.sha256(response.body).hexdigest()
     return response
 
 

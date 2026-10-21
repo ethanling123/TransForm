@@ -129,3 +129,13 @@ class ThroughTheServer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TokenLimitHoldsAtTheBoundaries(unittest.TestCase):
+    def test_the_scaled_size_never_exceeds_the_limits(self):
+        for w, h in ((1569, 1000), (1600, 1568), (2000, 2000), (1568, 1568), (1700, 900), (3000, 1233), (1555, 1555)):
+            data = png(w, h) if w * h < 2_500_000 else sparse_png(w, h)
+            out = Image.open(io.BytesIO(arms.fit_image_to_model(data)))
+            fits = max(out.size) <= arms.VISION_MAX_EDGE and math.ceil(out.size[0] / 28) * math.ceil(out.size[1] / 28) <= arms.VISION_MAX_TOKENS
+            unchanged = out.size == (w, h)  # kept as is because scaling would not shrink the file
+            self.assertTrue(fits or unchanged, (w, h, out.size))

@@ -145,6 +145,7 @@ class ConditionalFetch(unittest.TestCase):
         buf = io.BytesIO()
         pq.write_table(pa.table({"id": np.arange(n), "x": np.arange(n) * 1.5}), buf)
         table = cls.client.post("/materialized", content=buf.getvalue(), headers={"Content-Type": "application/octet-stream"}).json()["result_id"]
+        cls.table_id = table
         cls.urls = {"raw": f"/raw/{raw}",
                     "parquet": S.large_parquet_blob(0, 0, result_id=table).structured_content["url"].replace("http://localhost:8000", ""),
                     "arrow": S.large_arrow_ipc_blob(0, 0, result_id=table).structured_content["url"].replace("http://localhost:8000", "")}
@@ -164,3 +165,13 @@ class ConditionalFetch(unittest.TestCase):
     def test_changed_bytes_change_the_etag(self):
         other = self.client.post("/materialized-raw", content=b"other " * 5000, headers={"Content-Type": "text/plain"}).json()["result_id"]
         self.assertNotEqual(self.client.get(self.urls["raw"]).headers["etag"], self.client.get(f"/raw/{other}").headers["etag"])
+
+    def test_the_digest_header_is_only_on_a_full_response(self):
+        desc = S.fetch_arm("raw_blob", self.urls["raw"].rsplit("/", 1)[1]).structured_content
+        url = desc["data_url"].replace("http://localhost:8000", "")
+        full = self.client.get(url)
+        self.assertEqual(full.headers["x-content-digest"], hashlib.sha256(full.content).hexdigest())
+        part = self.client.get(url, headers={"Range": "bytes=0-9"})
+        self.assertNotIn("x-content-digest", part.headers)
+        again = self.client.get(url, headers={"If-None-Match": full.headers.get("etag", '"none"')})
+        self.assertNotIn("x-content-digest", again.headers)

@@ -114,17 +114,20 @@ def fit_image_to_model(data: bytes, max_edge: int = VISION_MAX_EDGE, max_tokens:
     im = Image.open(BytesIO(data))
     w, h = im.size
 
-    def tokens(a: float, b: float) -> int:
-        return -(-int(a) // 28) * -(-int(b) // 28)
+    def target(scale: float) -> tuple:
+        return max(1, int(w * scale)), max(1, int(h * scale))
+
+    def tokens(size: tuple) -> int:
+        return -(-size[0] // 28) * -(-size[1] // 28)
 
     scale = min(1.0, max_edge / max(w, h))
-    while tokens(w * scale, h * scale) > max_tokens:
+    while tokens(target(scale)) > max_tokens:
         scale *= 0.98
     if scale >= 1.0:
         return data
     im = im.convert("RGBA" if im.mode in ("RGBA", "LA", "P") else "RGB")
     out = BytesIO()
-    im.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS).save(out, "PNG")
+    im.resize(target(scale), Image.LANCZOS).save(out, "PNG")
     # Flat graphics can compress better at full size than after resampling; the provider downscales either way.
     return out.getvalue() if out.tell() < len(data) else data
 

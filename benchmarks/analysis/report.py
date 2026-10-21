@@ -341,7 +341,8 @@ Section 13 describes the cost-aware selector, which is in the server but off unl
   generic `GET /data/{{handle}}` route that serves any registered arm with a content digest header, and `list_arms` and
   `fetch_arm` tools. The ten existing arms are unchanged (golden byte digests; 37 tests at the time), and eight
   table-codec arms that the selector never picks became reachable. The Java server has none of this and the two tools
-  exist only in Python (the other 18 tools match). Design: `docs/superpowers/specs/2026-10-14-codec-registry-design.md`.
+  exist only in Python, and `large_result_auto` has an extra optional `consumer` argument (section 17); the other 17 shared
+  tools match (see the parity output above, regenerated after these changes). Design: `docs/superpowers/specs/2026-10-14-codec-registry-design.md`.
 - Measured whether lossy image and audio arms are worth using and whether they change a model's answers (section 10).
 - Replayed, implemented (experimental, behind a flag) and measured a cost-aware selector (sections 11 and 13).
 - Changed the Python server's default table codecs from snappy Parquet and uncompressed Arrow IPC to zstd for both,
@@ -458,8 +459,9 @@ Section 7 measured bytes and fidelity; this section asks whether a lossy arm is 
 **Bytes versus tokens.** A vision model charges by image dimensions, not file size. Claude counts one token per 28 x 28
 pixel patch (ceil(width / 28) x ceil(height / 28)) and downsizes anything above 1568 px on the long edge (2576 px for newer
 models); Gemini counts 258 tokens per 768 x 768 tile [7] [8]. File format and compression do not enter either formula. On
-the 212 M3-Bench images the median long edge is 1200 px and only 21% exceed 1568 px, so a lossy codec at the same
-resolution saves transfer bytes and nothing else; only resizing saves tokens (median 1,369 tokens as-is, 899 at a
+the 212 M3-Bench images the median long edge is 1200 px; 21% exceed 1568 px and 33% are downscaled once the 1568-token
+limit is counted (section 17), so for most images a lossy codec at the same resolution saves transfer bytes and nothing
+else; only resizing saves tokens (median 1,369 tokens as-is, 899 at a
 1024 px long edge by the Claude formula).
 
 **Time to deliver.** Transfer time against encode and decode time, for each link, relative to sending the lossless original
@@ -572,7 +574,7 @@ Seven ideas for making the data layer faster, each built, tested and measured on
 | 4 | model-aware arms behind a `consumer` hint (image scaled to the vision limits, 16 kHz audio) | **works, opt-in**: 33% of the M3-Bench images scaled, image bytes 68% of the original; audio 36% |
 | 5 | link speed learned from client reports; contextual bandit | **link speed works**; **bandit**: keyed by link it beats the best single arm in a per-draw replay (1.16x against 1.28x), not in a latency-weighted one |
 | 6 | parallel byte-range downloads | **no gain**: a single connection reached 87% of the WAN cap on 8 MB; extra connections were slower |
-| 7 | conditional fetch (`ETag` and `If-None-Match`) | **works when results repeat, which BIRD results rarely do**: 89 to 96% less time on a repeat, but repeated results are 0.9% of the bytes of the BIRD dev gold set |
+| 7 | conditional fetch (`ETag` and `If-None-Match`) | **works when the same URL is fetched again, which agents may or may not do**: 89 to 96% less time on a repeat of one URL; the ETag is per handle, so two queries that return the same rows do not share one, and such repeated results are 0.9% of the bytes of the BIRD dev gold set (an upper bound for content-addressed reuse, which is not built) |
 
 #### 1. Stream arms
 
@@ -609,8 +611,8 @@ and 4.5 s in another with identical bytes.
 
 {model_aware}
 
-The image count scaled is higher than the 21% above 1568 px quoted in section 10, because the 1568 visual-token limit
-also binds on images whose long edge is under 1568 px. "Tokens the model sees" are equal by construction here (the
+21% of the images exceed 1568 px on the long edge but 33% are scaled, because the 1568 visual-token limit also binds on
+images whose long edge is under 1568 px. "Tokens the model sees" are equal by construction here (the
 provider downscales an oversized image to the same limits), and the scaling is Pillow's, not the provider's. The audio arm
 leaves word error rate unchanged in section 10 (`wav-16k`, clean and noisy). The `consumer` argument exists only on this
 server's `large_result_auto`, so its tool schema no longer matches the Java server's.
@@ -628,7 +630,8 @@ online result.
 
 The existing bandit keys on the optimization target only, which is the `global` row. Keyed by link it ends at 1.16x
 against 2.47x for the global table in the per-draw view; weighted by latency, no policy beats the best single arm, because the slow links
-dominate the total and every arm is close there.
+dominate the total and every arm is close there. The `selector (logged choice)` row paid a real tool call while the forced arms paid a ping, which
+inflates it on the fast links by a few milliseconds per payload; read it as an upper bound.
 
 #### 7. How often results repeat
 
@@ -657,7 +660,8 @@ dominate the total and every arm is close there.
 {formats}
 - The TPC-DS table shows Python's Arrow IPC output is larger than Java's on wide tables; the cause was not investigated.
 - **Lossy image and audio arms (section 10).** A lossy image codec saves transfer bytes, not model tokens: tokens depend
-  on pixel dimensions, and only 21% of the M3-Bench images are large enough for a provider to downscale. The byte saving is
+  on pixel dimensions, and only 33% of the M3-Bench images are large enough for a provider to downscale (21% by long edge
+  alone). The byte saving is
   large where it exists (median WebP q80 is 11% and AVIF q60 8% of the PNG), but it is not universal: 4% to 13% of the
   images (screenshots and graphics that PNG already compresses well) come out larger under WebP q60, WebP q80 and
   JPEG q75, and the rendered text documents came out 104% to 317% of the PNG under WebP and JPEG. A selector must compare real
@@ -690,15 +694,17 @@ dominate the total and every arm is close there.
   and fixed: the codec calibration ran on the first request (about 0.17 s) and gzip and brotli were sampled on a LAN
   where they cannot beat zstd. A first version without those fixes measured 1.43x and 1.45x on LAN images and text.
 - **Real network, two containers (section 16).** With kernel-shaped links a 4 MB download reached 35% (LAN), 55% (WAN),
-  80% (cellular) and 58% (bad wifi) of the configured rate, so slow start, round-trip time and loss cost more than a
-  software proxy shows. The selector was within noise of the fastest forced option in every cell: Parquet for the generated
+  80% (cellular) and 58% (bad wifi) of the configured rate, but an 8 MB download reached 87% of the WAN cap and 93% of
+  the cellular cap (section 17), so most of the shortfall is TCP slow start on a short transfer and it shrinks with size;
+  a software proxy without slow start overstates the throughput of payloads of a few MB. The selector was within noise of the fastest forced option in every cell: Parquet for the generated
   table on every link, Parquet for the uploaded table except on the LAN (where it chose Arrow IPC, 10 ms slower), brotli
   for compressible text, and raw for incompressible bytes. JSON for the 6.6 MB uploaded table took 50 s on bad wifi against 2.7 s as Parquet.
 - **Seven data-plane experiments (section 17).** Stream delivery (9x to 45x faster on TPC-DS) and the opt-in
   image and audio arms (68% and 36% of the bytes) paid clearly; inline bytes (small payloads only) and the learned link
   speed (it matched the configured choices) paid narrowly; table codec choice and parallel ranges did not pay; a bandit
   keyed by link beat the best single arm only when each draw counts equally; conditional fetch saves 89 to 96% of a repeat
-  but results repeat in 10.9% of the BIRD dev gold queries and 0.9% of its bytes.
+  fetch of one URL, but the ETag is per handle, and results repeat across queries in 10.9% of the BIRD dev gold queries
+  and 0.9% of its bytes (an upper bound for content-addressed reuse, which is not built).
 - **Table codec defaults (section 12).** zstd for Parquet and Arrow IPC cuts bytes 13% to 40% (Parquet) and 74% to 91%
   (Arrow IPC) on BIRD, with total latency within 4% on localhost, LAN and WAN for the typical query. On BIRD results above
   50K cells over cellular, Arrow IPC went from 19.0 s to 5.2 s (5 queries). On TPC-DS the min_bytes and min_latency selector's total latency

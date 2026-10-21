@@ -96,7 +96,7 @@ M3-Bench images and 14 speech clips: `benchmarks/sweeps/model_aware.py`.
 
 ## Conditional and ranged fetches
 
-The raw, Parquet and Arrow IPC blob routes send an `ETag` (sha256 of the bytes), answer `If-None-Match` with `304`, and
+The raw, Parquet and Arrow IPC blob routes send an `ETag` (the handle and the byte count, so no hashing per response), answer `If-None-Match` with `304`, and
 accept a single `Range: bytes=a-b` header (`206`). Measured in REPORT.md section 17: a repeat of an unchanged 4.5 MB
 result takes 0.1 s instead of 0.9 s on WAN; parallel ranges did not make a download faster.
 

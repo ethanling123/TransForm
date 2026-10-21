@@ -2,7 +2,7 @@
 
 Each log row gives the latency of every arm (raw, gzip, zstd, brotli) for one payload on one link, so a bandit's feedback
 can be replayed: only the arm it chooses is revealed. This is a replay of single measured latencies, not an online
-experiment, and the payload set is small (258 images, audio clips and texts across five links), so it shows how fast
+experiment, and the set is small (418 payload and link pairs: images, speech clips and texts across five links), so it shows how fast
 different contexts learn, not how a deployed bandit would do on new traffic.
 
 Policies (epsilon-greedy, epsilon = 0.1, every arm tried once per context before exploiting):
