@@ -112,6 +112,7 @@ async def main():
     parser.add_argument("--no-json", action="store_true", help="skip JSON, which is slow on a slow link")
     parser.add_argument("--breakdown", action="store_true", help="only time the pieces of one small blob fetch")
     parser.add_argument("--learn", action="store_true", help="report a few downloads to the server, then let the selector choose")
+    parser.add_argument("--ranges", action="store_true", help="download one 8 MB payload over 1, 2, 4 and 8 connections")
     parser.add_argument("--tables", action="store_true", help="only time the selector on three larger uploaded tables")
     args = parser.parse_args()
     profile = os.environ.get("PROFILE", "unshaped")
@@ -142,6 +143,9 @@ async def main():
             return _write(args.out, rows)
         if args.learn:
             await learn_link(session, client, record)
+            return _write(args.out, rows)
+        if args.ranges:
+            await ranges_experiment(client, record, args.reps)
             return _write(args.out, rows)
         if args.tables:
             await larger_tables(session, client, record, args.reps)
@@ -177,6 +181,32 @@ async def main():
             record(name, "selector min_latency", runs[-1][2], runs[-1][0], statistics.median(r[1] for r in runs[1:]))
 
     _write(args.out, rows)
+
+
+async def ranges_experiment(client, record, reps):
+    """One payload fetched as N byte ranges over N separate connections; N=0 is a plain GET on the shared connection."""
+    data = os.urandom(8_000_000)
+    rid = (await client.post("http://localhost:8000/materialized-raw", content=data,
+                             headers={"Content-Type": "application/octet-stream"})).json()["result_id"]
+    url = f"http://localhost:8000/raw/{rid}"
+
+    async def part(start, end):
+        async with httpx.AsyncClient(timeout=600) as c:
+            return (await c.get(url, headers={"Range": f"bytes={start}-{end}"})).content
+
+    for n in (0, 1, 2, 4, 8):
+        times = []
+        for _ in range(reps):
+            t = time.perf_counter()
+            if n == 0:
+                body = (await client.get(url)).content
+            else:
+                step = -(-len(data) // n)
+                body = b"".join(await asyncio.gather(*[part(a, min(a + step, len(data)) - 1) for a in range(0, len(data), step)]))
+            times.append(time.perf_counter() - t)
+            assert body == data
+        label = "plain GET" if n == 0 else f"{n} range request{'s' if n > 1 else ''}"
+        record("ranges 8 MB", f"{label} = {len(data) * 8 / statistics.median(times) / 1e6:.1f} Mbit/s", "", len(data), statistics.median(times))
 
 
 async def learn_link(session, client, record):

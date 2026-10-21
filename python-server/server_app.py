@@ -3014,11 +3014,29 @@ async def raw_blob_endpoint(request) -> Response:
         )
     data = config.raw_path.read_bytes()
     headers = {"X-Benchmark-Bytes": str(len(data))}
-    return Response(
-        content=data,
-        media_type=config.raw_mime_type or "application/octet-stream",
-        headers=headers,
-    )
+    return _with_ranges(request, data, config.raw_mime_type or "application/octet-stream", headers)
+
+
+def _with_ranges(request, data: bytes, media_type: str, headers: Dict[str, str]) -> Response:
+    """200 with the whole payload, or 206 with the slice a single `Range: bytes=a-b` header asks for.
+
+    A client can fetch several slices over separate connections; see benchmarks/netem_docker/quick.py --ranges.
+    """
+    headers = {**headers, "Accept-Ranges": "bytes"}
+    spec = request.headers.get("range", "")
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", spec.strip())
+    if not match or match.group(1) == match.group(2) == "":
+        return Response(content=data, media_type=media_type, headers=headers)
+    total = len(data)
+    if match.group(1) == "":  # suffix range: the last N bytes
+        start, end = max(0, total - int(match.group(2))), total - 1
+    else:
+        start = int(match.group(1))
+        end = min(int(match.group(2)), total - 1) if match.group(2) else total - 1
+    if start >= total or start > end:
+        return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{total}"})
+    return Response(content=data[start:end + 1], status_code=206, media_type=media_type,
+                    headers={**headers, "Content-Range": f"bytes {start}-{end}/{total}"})
 
 
 # ----- Unstructured payload codecs ------------------------------------------------

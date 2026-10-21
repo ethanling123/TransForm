@@ -105,3 +105,32 @@ class InlineTransport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RangeRequests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.client = shared.client(S.app)
+        cls.data = bytes(range(256)) * 40
+        cls.url = "/raw/" + cls.client.post("/materialized-raw", content=cls.data, headers={"Content-Type": "application/octet-stream"}).json()["result_id"]
+
+    def test_a_plain_get_is_the_whole_payload_and_advertises_ranges(self):
+        r = self.client.get(self.url)
+        self.assertEqual((r.status_code, r.content, r.headers["accept-ranges"]), (200, self.data, "bytes"))
+
+    def test_a_range_returns_exactly_that_slice(self):
+        r = self.client.get(self.url, headers={"Range": "bytes=100-199"})
+        self.assertEqual((r.status_code, r.content), (206, self.data[100:200]))
+        self.assertEqual(r.headers["content-range"], f"bytes 100-199/{len(self.data)}")
+
+    def test_open_ended_and_suffix_ranges(self):
+        self.assertEqual(self.client.get(self.url, headers={"Range": f"bytes={len(self.data) - 10}-"}).content, self.data[-10:])
+        self.assertEqual(self.client.get(self.url, headers={"Range": "bytes=-25"}).content, self.data[-25:])
+
+    def test_slices_put_back_together_are_the_original(self):
+        n, step = len(self.data), 3000
+        parts = [self.client.get(self.url, headers={"Range": f"bytes={a}-{min(a + step, n) - 1}"}).content for a in range(0, n, step)]
+        self.assertEqual(b"".join(parts), self.data)
+
+    def test_a_range_past_the_end_is_416(self):
+        self.assertEqual(self.client.get(self.url, headers={"Range": f"bytes={len(self.data) + 5}-"}).status_code, 416)
