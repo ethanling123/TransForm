@@ -111,3 +111,37 @@ def estimate_hints(read_sample: Callable[[], bytes], raw_bytes: int, mbps: float
             hints[keys[arm]] = estimate(arm)
             hints["stage"] = "sampled"
     return hints
+
+
+# ----- Table codec and level ----------------------------------------------------------
+
+TABLE_SAMPLE_ROWS = 20_000
+TABLE_SKIP_TRANSFER_S = 0.02  # a default that crosses the link in under this cannot repay the cost of trying the others
+TABLE_MIN_GAIN = 0.05  # switch away from the default only for at least this fraction of its estimated cost
+
+
+def choose_table_arm(sample, total_rows: int, candidates, mbps: float):
+    """Pick the cheapest (encode + transfer + decode) table arm from a row sample.
+
+    `candidates` is a list of (arm, encode(table) -> bytes, decode(bytes) -> object, already_encoded); the first is the
+    server's default. Sizes and times from the sample are scaled linearly to `total_rows`. An arm whose bytes are already
+    cached pays no encode time. Decode time on the server stands in for the client's.
+    Returns (arm, report) where report maps arm -> dict(cost_s, bytes, encode_s, decode_s).
+    """
+    scale = total_rows / max(1, sample.num_rows)
+    report: Dict[str, Dict[str, float]] = {}
+    for arm, encode, decode, cached in candidates:
+        t = time.perf_counter()
+        data = encode(sample)
+        encode_s = (time.perf_counter() - t) * scale
+        t = time.perf_counter()
+        decode(data)
+        decode_s = (time.perf_counter() - t) * scale
+        size = len(data) * scale
+        cost = (0.0 if cached else encode_s) + size * 8.0 / (mbps * 1e6) + decode_s
+        report[arm] = {"cost_s": cost, "bytes": size, "encode_s": encode_s, "decode_s": decode_s}
+    default = candidates[0][0]
+    best = min(report, key=lambda a: report[a]["cost_s"])
+    if best != default and report[best]["cost_s"] > (1 - TABLE_MIN_GAIN) * report[default]["cost_s"]:
+        best = default
+    return best, report

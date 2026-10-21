@@ -1980,6 +1980,45 @@ def _maybe_inline(result: CallToolResult, get_data, size_hint: Optional[int], mi
     return CallToolResult(content=result.content, structured_content=structured, _meta=meta)
 
 
+
+
+def _table_arm_candidates(config: ResultConfig, container: str):
+    """(arm, encode, decode, already_encoded) for the container's default and its registered codec arms."""
+    strategy = config.encoding_strategy or _get_default_encoding_strategy()
+    if container == "parquet":
+        default = ("parquet_blob", lambda t: _encode_parquet(t, config.compression or _get_default_compression(), strategy),
+                   lambda b: pq.read_table(BytesIO(b)), config.cached_parquet_blob_bytes is not None)
+        others = [(a.name, (lambda t, a=a: arms.encode_parquet(t, a.codec, a.level, strategy)), lambda b: pq.read_table(BytesIO(b)), False)
+                  for a in REGISTRY.for_modality("table") if a.container == "parquet" and a.transport == "blob" and not a.selectable]
+    else:
+        default = ("arrow_ipc_blob", lambda t: _encode_arrow_ipc_file(t, config.ipc_compression or _get_default_arrow_ipc_compression()),
+                   lambda b: pa.ipc.open_file(pa.BufferReader(b)).read_all(), config.cached_arrow_ipc_blob_bytes is not None)
+        others = [(a.name, (lambda t, a=a: arms.encode_arrow_ipc(t, a.codec)), lambda b: pa.ipc.open_file(pa.BufferReader(b)).read_all(), False)
+                  for a in REGISTRY.for_modality("table") if a.container == "arrow_ipc" and a.transport == "blob" and not a.selectable]
+    return [default, *others]
+
+
+def _cost_aware_table_arm(result_id: Optional[str], chosen: str, default_bytes: int, target: OptimizationTarget) -> Optional[str]:
+    """Registered table codec arm that beats the default for this result on this link, or None to keep the default.
+
+    Only with FORMAT_COST_AWARE=1, the latency target, a known link speed and a registered table; a default that crosses
+    the link in a few milliseconds is kept without trying anything.
+    """
+    mbps = _get_network_mbps()
+    if not (cost_model.enabled() and target == OptimizationTarget.MIN_LATENCY and mbps > 0 and result_id):
+        return None
+    cfg = RESULT_REGISTRY.get(result_id)
+    if cfg is None or cfg.payload_kind != "tabular" or cfg.materialized_path is None and cfg.cached_arrow_table is None:
+        return None
+    if default_bytes * 8.0 / (mbps * 1e6) <= cost_model.TABLE_SKIP_TRANSFER_S:
+        return None
+    table = _resolve_arrow_table(cfg)
+    sample = table.slice(0, cost_model.TABLE_SAMPLE_ROWS)
+    container = "parquet" if chosen == "parquet_blob" else "arrow_ipc"
+    best, _ = cost_model.choose_table_arm(sample, table.num_rows, _table_arm_candidates(cfg, container), mbps)
+    return None if best == chosen else best
+
+
 @mcp.tool()
 def large_result_auto(
     n_rows: int,
@@ -2266,6 +2305,25 @@ def large_result_auto(
         }
         return CallToolResult(
             content=[TextContent(type="text", text=f"Returning Arrow IPC stream descriptor (arrow_ipc_stream): {desc.get('url')}")],
+            structured_content=structured,
+        )
+
+    alt_arm = _cost_aware_table_arm(result_id, chosen, int(hints_for_select["parquet_bytes"] if chosen == "parquet_blob"
+                                                         else hints_for_select["arrow_ipc_bytes"]), sel_target) \
+        if chosen in ("parquet_blob", "arrow_ipc_blob") else None
+    if alt_arm is not None:
+        spec = REGISTRY.get(alt_arm)
+        desc = fetch_arm(alt_arm, result_id).structured_content or {}
+        structured = {
+            "payload_kind": "tabular",
+            "chosen_format": chosen,
+            "optimization_target": sel_target.value,
+            "payload": {"kind": "descriptor", **desc},
+            "decode": {"encoding": "parquet" if spec.container == "parquet" else "arrow_ipc", "transport": "http_blob",
+                       "url": desc.get("url"), "arm": alt_arm, "codec": spec.codec, "level": spec.level},
+        }
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"Returning {alt_arm} descriptor (cost-aware codec choice for {chosen}): {desc.get('url')}")],
             structured_content=structured,
         )
 

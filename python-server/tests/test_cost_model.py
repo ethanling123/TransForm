@@ -164,3 +164,78 @@ class ServerHints(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TableArmChoice(unittest.TestCase):
+    """cost_model.choose_table_arm with stand-in encoders, so the outcome does not depend on this machine's speed."""
+
+    def sample(self):
+        import pyarrow as pa
+        return pa.table({"x": list(range(1000))})
+
+    def candidates(self, sizes, cached_default=True, delay=None):
+        import time
+
+        def make(size, wait):
+            def encode(table):
+                time.sleep(wait)
+                return b"x" * size
+            return encode
+        names = list(sizes)
+        return [(n, make(sizes[n], (delay or {}).get(n, 0.0)), lambda b: None, cached_default and i == 0) for i, n in enumerate(names)]
+
+    def test_a_much_smaller_arm_wins_on_a_slow_link(self):
+        best, _ = cost_model.choose_table_arm(self.sample(), 1000, self.candidates({"default": 1_000_000, "small": 400_000}), mbps=10)
+        self.assertEqual(best, "small")
+
+    def test_a_marginal_gain_keeps_the_default(self):
+        best, _ = cost_model.choose_table_arm(self.sample(), 1000, self.candidates({"default": 1_000_000, "small": 980_000}), mbps=10)
+        self.assertEqual(best, "default")
+
+    def test_encode_time_counts_against_an_arm_that_is_not_cached(self):
+        # 0.05 s of sample encode time at a 1000x scale is 50 s, far more than the 0.5 s saved on the wire
+        best, report = cost_model.choose_table_arm(
+            self.sample(), 1_000_000, self.candidates({"default": 1_000, "slow": 100}, delay={"slow": 0.05}), mbps=1)
+        self.assertEqual(best, "default")
+        self.assertGreater(report["slow"]["encode_s"], 40)
+
+
+class TableCodecInServer(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import io
+        import numpy as np
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        cls.client = shared.client(S.app)
+        rng = np.random.default_rng(0)
+        n = 60_000
+        table = pa.table({"id": np.arange(n), "x": rng.random(n), "tag": [f"category-{i % 40}" for i in range(n)]})
+        buf = io.BytesIO()
+        pq.write_table(table, buf)
+        cls.rid = cls.client.post("/materialized", content=buf.getvalue(), headers={"Content-Type": "application/octet-stream"}).json()["result_id"]
+        cls.rows = n
+
+    def auto(self, target="min_latency"):
+        return S.large_result_auto(0, 0, result_id=self.rid, optimization_target=target).structured_content
+
+    def test_flag_off_keeps_the_default_arm(self):
+        with environ(FORMAT_LATENCY_NETWORK_MBPS="5"):
+            self.assertNotIn("arm", self.auto()["decode"])
+
+    def test_flag_on_returns_a_decodable_blob_whatever_arm_it_picks(self):
+        import io
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        with environ(FORMAT_COST_AWARE="1", FORMAT_LATENCY_NETWORK_MBPS="5"):
+            out = self.auto()
+        data = self.client.get(out["decode"]["url"].replace("http://localhost:8000", "")).content
+        if out["decode"]["encoding"] == "parquet":
+            rows = pq.read_table(io.BytesIO(data)).num_rows
+        else:
+            rows = pa.ipc.open_file(pa.BufferReader(data)).read_all().num_rows
+        self.assertEqual(rows, self.rows)
+
+    def test_min_bytes_never_swaps_the_arm(self):
+        with environ(FORMAT_COST_AWARE="1", FORMAT_LATENCY_NETWORK_MBPS="5"):
+            self.assertNotIn("arm", self.auto("min_bytes")["decode"])

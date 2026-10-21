@@ -80,12 +80,14 @@ async def table_formats(session, client, rid, n_rows, n_cols):
     async def selector():
         out = await call_large_result_auto(session, n_rows, n_cols, result_id=rid, optimization_target="min_latency")
         chosen = out["chosen_format"]
+        if out.get("decode", {}).get("arm"):
+            chosen += ":" + out["decode"]["arm"]
         if chosen == "json":
             return len(json.dumps(out["payload"], separators=(",", ":")).encode()), -1, chosen
         if "inline_bytes" in out:
             return len(out["inline_bytes"]), -1, chosen + " inline"
         url = out["decode"]["url"]
-        if chosen.endswith("_stream"):
+        if out["chosen_format"].endswith("_stream"):
             total = sum([len(c) + 8 async for c in fetch_stream_chunks(client, url)])
             return total, -1, chosen
         return len(await fetch_blob(client, url)), -1, chosen
@@ -109,6 +111,7 @@ async def main():
     parser.add_argument("--reps", type=int, default=REPS)
     parser.add_argument("--no-json", action="store_true", help="skip JSON, which is slow on a slow link")
     parser.add_argument("--breakdown", action="store_true", help="only time the pieces of one small blob fetch")
+    parser.add_argument("--tables", action="store_true", help="only time the selector on three larger uploaded tables")
     args = parser.parse_args()
     profile = os.environ.get("PROFILE", "unshaped")
     rows = []
@@ -135,6 +138,9 @@ async def main():
 
         if args.breakdown:
             await breakdown(session, client, record)
+            return _write(args.out, rows)
+        if args.tables:
+            await larger_tables(session, client, record, args.reps)
             return _write(args.out, rows)
         up = await register_materialized(client, _parquet(uploaded_table(UPLOADED_ROWS)))
         for workload, rid, n_rows, n_cols in ((f"generated {SYNTHETIC_ROWS}x10", None, SYNTHETIC_ROWS, 10),
@@ -167,6 +173,27 @@ async def main():
             record(name, "selector min_latency", runs[-1][2], runs[-1][0], statistics.median(r[1] for r in runs[1:]))
 
     _write(args.out, rows)
+
+
+def larger_tables(session, client, record, reps):
+    return _larger_tables(session, client, record, reps)
+
+
+async def _larger_tables(session, client, record, reps):
+    """Selector (min_latency) on tables big enough that the codec choice matters."""
+    rng = np.random.default_rng(3)
+    n = 200_000
+    shapes = {
+        f"mixed {n}x6": uploaded_table(n),
+        "numeric 50000x20 random": pa.table({f"c{i}": (rng.random(50_000) if i % 2 else rng.integers(0, 10**9, 50_000)) for i in range(20)}),
+        f"categorical {n}x8": pa.table({f"k{i}": np.array([f"value-{j}" for j in range(30)])[rng.integers(0, 30, n)] for i in range(8)}),
+    }
+    for label, table in shapes.items():
+        up = await register_materialized(client, _parquet(table))
+        fn = [x for x in await table_formats(session, client, up["result_id"], up["n_rows"], up["n_cols"]) if x[0].startswith("selector")][0][1]
+        await timed(fn, up["n_rows"])
+        runs = [await timed(fn, up["n_rows"]) for _ in range(reps)]
+        record(f"tables {label}", "selector min_latency", runs[-1][2], runs[0][0], statistics.median(r[1] for r in runs))
 
 
 def _write(out, rows):
