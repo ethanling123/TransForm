@@ -134,3 +134,33 @@ class RangeRequests(unittest.TestCase):
 
     def test_a_range_past_the_end_is_416(self):
         self.assertEqual(self.client.get(self.url, headers={"Range": f"bytes={len(self.data) + 5}-"}).status_code, 416)
+
+
+class ConditionalFetch(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.client = shared.client(S.app)
+        raw = cls.client.post("/materialized-raw", content=b"payload " * 5000, headers={"Content-Type": "text/plain"}).json()["result_id"]
+        n = 2000
+        buf = io.BytesIO()
+        pq.write_table(pa.table({"id": np.arange(n), "x": np.arange(n) * 1.5}), buf)
+        table = cls.client.post("/materialized", content=buf.getvalue(), headers={"Content-Type": "application/octet-stream"}).json()["result_id"]
+        cls.urls = {"raw": f"/raw/{raw}",
+                    "parquet": S.large_parquet_blob(0, 0, result_id=table).structured_content["url"].replace("http://localhost:8000", ""),
+                    "arrow": S.large_arrow_ipc_blob(0, 0, result_id=table).structured_content["url"].replace("http://localhost:8000", "")}
+
+    def test_every_blob_route_sends_an_etag_and_honours_if_none_match(self):
+        for name, url in self.urls.items():
+            first = self.client.get(url)
+            etag = first.headers["etag"]
+            again = self.client.get(url, headers={"If-None-Match": etag})
+            self.assertEqual((again.status_code, again.content), (304, b""), name)
+            self.assertEqual(again.headers["etag"], etag)
+
+    def test_a_different_etag_gets_the_full_payload(self):
+        r = self.client.get(self.urls["raw"], headers={"If-None-Match": '"sha256-0000"'})
+        self.assertEqual((r.status_code, len(r.content)), (200, len(b"payload " * 5000)))
+
+    def test_changed_bytes_change_the_etag(self):
+        other = self.client.post("/materialized-raw", content=b"other " * 5000, headers={"Content-Type": "text/plain"}).json()["result_id"]
+        self.assertNotEqual(self.client.get(self.urls["raw"]).headers["etag"], self.client.get(f"/raw/{other}").headers["etag"])

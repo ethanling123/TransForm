@@ -2826,11 +2826,7 @@ async def parquet_blob_endpoint(request) -> Response:
         "X-Benchmark-Encoding-Strategy": enc_strat,
     }
 
-    return Response(
-        content=data,
-        media_type="application/octet-stream",
-        headers=headers,
-    )
+    return _with_ranges(request, data, "application/octet-stream", headers)
 
 
 def _stream_parquet_chunks(config: ResultConfig):
@@ -2931,11 +2927,7 @@ async def ipc_blob_endpoint(request) -> Response:
         "X-Benchmark-IPC-Compression": ipc_comp,
     }
 
-    return Response(
-        content=data,
-        media_type="application/vnd.apache.arrow.file",
-        headers=headers,
-    )
+    return _with_ranges(request, data, "application/vnd.apache.arrow.file", headers)
 
 
 def _stream_arrow_ipc_chunks(config: ResultConfig):
@@ -3018,11 +3010,16 @@ async def raw_blob_endpoint(request) -> Response:
 
 
 def _with_ranges(request, data: bytes, media_type: str, headers: Dict[str, str]) -> Response:
-    """200 with the whole payload, or 206 with the slice a single `Range: bytes=a-b` header asks for.
+    """200 with the whole payload, 304 if `If-None-Match` names its digest, or 206 with the slice a single
+    `Range: bytes=a-b` header asks for.
 
     A client can fetch several slices over separate connections; see benchmarks/netem_docker/quick.py --ranges.
     """
-    headers = {**headers, "Accept-Ranges": "bytes"}
+    etag = '"sha256-' + hashlib.sha256(data).hexdigest()[:32] + '"'
+    headers = {**headers, "Accept-Ranges": "bytes", "ETag": etag}
+    candidates = [t.strip() for t in request.headers.get("if-none-match", "").split(",")]
+    if etag in candidates or "*" in candidates:  # the client already holds exactly these bytes
+        return Response(status_code=304, headers={"ETag": etag})
     spec = request.headers.get("range", "")
     match = re.fullmatch(r"bytes=(\d*)-(\d*)", spec.strip())
     if not match or match.group(1) == match.group(2) == "":

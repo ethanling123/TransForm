@@ -113,6 +113,7 @@ async def main():
     parser.add_argument("--breakdown", action="store_true", help="only time the pieces of one small blob fetch")
     parser.add_argument("--learn", action="store_true", help="report a few downloads to the server, then let the selector choose")
     parser.add_argument("--ranges", action="store_true", help="download one 8 MB payload over 1, 2, 4 and 8 connections")
+    parser.add_argument("--conditional", action="store_true", help="synthetic: fetch a result, then fetch it again with If-None-Match")
     parser.add_argument("--tables", action="store_true", help="only time the selector on three larger uploaded tables")
     args = parser.parse_args()
     profile = os.environ.get("PROFILE", "unshaped")
@@ -143,6 +144,9 @@ async def main():
             return _write(args.out, rows)
         if args.learn:
             await learn_link(session, client, record)
+            return _write(args.out, rows)
+        if args.conditional:
+            await conditional_experiment(session, client, record, args.reps)
             return _write(args.out, rows)
         if args.ranges:
             await ranges_experiment(client, record, args.reps)
@@ -181,6 +185,26 @@ async def main():
             record(name, "selector min_latency", runs[-1][2], runs[-1][0], statistics.median(r[1] for r in runs[1:]))
 
     _write(args.out, rows)
+
+
+async def conditional_experiment(session, client, record, reps):
+    """Synthetic repeated fetch of one 4.5 MB table: unconditional repeat against a repeat that sends If-None-Match."""
+    table = uploaded_table(200_000)
+    up = await register_materialized(client, _parquet(table))
+    desc = (await call_large_parquet_blob(session, up["n_rows"], up["n_cols"], result_id=up["result_id"]))["url"]
+    first = await client.get(desc)
+    etag = first.headers["etag"]
+    plain, conditional = [], []
+    for _ in range(reps):
+        t = time.perf_counter()
+        body = (await client.get(desc)).content
+        plain.append(time.perf_counter() - t)
+        t = time.perf_counter()
+        resp = await client.get(desc, headers={"If-None-Match": etag})
+        conditional.append(time.perf_counter() - t)
+        assert resp.status_code == 304 and resp.content == b""
+    record("conditional fetch", "repeat, unconditional", "", len(body), statistics.median(plain))
+    record("conditional fetch", "repeat, If-None-Match (304)", "", 0, statistics.median(conditional))
 
 
 async def ranges_experiment(client, record, reps):
