@@ -33,6 +33,7 @@ MCP endpoint: `http://localhost:8000/mcp/mcp`. The client and sweep scripts are 
 | `ARROW_IPC_COMPRESSION` | `zstd` | `none`, `lz4` or `zstd`; a reader needs zstd support in its Arrow build (pyarrow has it) |
 | `FORMAT_COST_AWARE` | off | `1` enables the experimental cost-aware unstructured selector (`min_latency` only, needs `FORMAT_LATENCY_NETWORK_MBPS` > 0): sizes are sampled estimates, nothing is compressed to choose, and compute time is scored with transfer time (see `cost_model.py`) |
 | `FORMAT_INLINE_MAX_BYTES` | `0` (off) | experimental: a blob arm whose bytes are at most this many is returned inside the tool result's `_meta` (key `transform/inline`, base64 with a sha256) instead of behind a URL. Measured gain only up to about 100 KB on WAN and 50 KB on cellular; 65536 is a reasonable value. Hosts that forward `_meta` to the model would put the base64 in context |
+| `FORMAT_LEARN_LINK` | off | `1`: with no `FORMAT_LATENCY_NETWORK_MBPS`, use the median throughput of the last ten client-reported downloads of 200 KB or more (`record_format_outcome` with `bytes` and `latency_s`); one estimate for the whole server |
 | `FORMAT_LATENCY_RTT_MS` | `0` | with a link speed set, inline only while the extra base64 transfer time is less than this round trip |
 | `FORMAT_SELECT_TARGET` | `min_latency` | `min_bytes`, `min_latency` or `min_time_to_first_rows` |
 | `FORMAT_LATENCY_NETWORK_MBPS` | `0` | link rate the latency target assumes; at 0 it falls back to bytes |
@@ -92,4 +93,10 @@ as lossy and never chosen by the selector. They need Pillow (in `requirements.tx
 argument exists only in this server, so the tool schema no longer matches the Java server's for `large_result_auto`. The
 provider's own resampler differs from Pillow's, so "the model sees the same thing" is approximate. Measured on the 212
 M3-Bench images and 14 speech clips: `benchmarks/sweeps/model_aware.py`.
+
+## Conditional and ranged fetches
+
+The raw, Parquet and Arrow IPC blob routes send an `ETag` (sha256 of the bytes), answer `If-None-Match` with `304`, and
+accept a single `Range: bytes=a-b` header (`206`). Measured in REPORT.md section 17: a repeat of an unchanged 4.5 MB
+result takes 0.1 s instead of 0.9 s on WAN; parallel ranges did not make a download faster.
 
