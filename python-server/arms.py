@@ -66,14 +66,23 @@ class ArmRegistry:
         return list(self._arms.values())
 
 
-def encode_parquet(table: pa.Table, codec: str, level: Optional[int], strategy: str) -> bytes:
-    """Parquet bytes for *table*; ``strategy="data_driven"`` picks dictionary and column encodings from the data."""
+def encoding_params(table: pa.Table, strategy: str) -> Optional[Dict[str, Any]]:
+    """Per-column encodings for ``strategy="data_driven"`` (None otherwise); compute once to encode many slices."""
+    return select_encoding_params(table) if strategy == "data_driven" else None
+
+
+def encode_parquet(table: pa.Table, codec: str, level: Optional[int], strategy: str,
+                   params: Optional[Dict[str, Any]] = None) -> bytes:
+    """Parquet bytes for *table*; ``strategy="data_driven"`` picks dictionary and column encodings from the data.
+
+    Pass *params* from ``encoding_params`` of the whole table to encode slices of it without re-deriving them.
+    """
     buf = BytesIO()
     kwargs: Dict[str, Any] = {"compression": codec}
     if level is not None:
         kwargs["compression_level"] = level
     if strategy == "data_driven":
-        params = select_encoding_params(table)
+        params = params if params is not None else select_encoding_params(table)
         kwargs["use_dictionary"] = params.get("use_dictionary", [])
         if params.get("column_encoding"):
             kwargs["column_encoding"] = params["column_encoding"]

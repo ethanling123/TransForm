@@ -667,9 +667,9 @@ def _get_default_encoding_strategy() -> str:
     return raw if raw in VALID_ENCODING_STRATEGIES else "default"
 
 
-def _encode_parquet(table: pa.Table, compression: str, encoding_strategy: str) -> bytes:
+def _encode_parquet(table: pa.Table, compression: str, encoding_strategy: str, params: Optional[Dict[str, Any]] = None) -> bytes:
     """Encode an Arrow table to Parquet bytes with the given codec and strategy."""
-    return arms.encode_parquet(table, compression, None, encoding_strategy)
+    return arms.encode_parquet(table, compression, None, encoding_strategy, params)
 
 
 # ----- Arrow IPC (file format) ----------------------------------------------------
@@ -2701,13 +2701,14 @@ def _stream_parquet_chunks(config: ResultConfig):
 
     if config.materialized_path is not None or config.cached_dataframe is not None:
         # F7: prefer the cached DataFrame; fall through to disk read when missing.
-        full_df = _resolve_dataframe(config)
-        total_rows = len(full_df)
+        # Slice the cached Arrow table (zero-copy) and derive the encodings once; converting a DataFrame slice for
+        # every chunk cost about 90 ms per 8K-row chunk of a 34-column table.
+        full_table = _resolve_arrow_table(config)
+        params = arms.encoding_params(full_table, enc_strat)
+        total_rows = full_table.num_rows
         while offset < total_rows:
             this_rows = min(rows_per_chunk, total_rows - offset)
-            chunk_df = full_df.iloc[offset : offset + this_rows]
-            table = pa.Table.from_pandas(chunk_df, preserve_index=False)
-            chunk = _encode_parquet(table, comp, enc_strat)
+            chunk = _encode_parquet(full_table.slice(offset, this_rows), comp, enc_strat, params)
             length_prefix = len(chunk).to_bytes(8, byteorder="big")
             yield length_prefix + chunk
             offset += this_rows
@@ -2805,13 +2806,11 @@ def _stream_arrow_ipc_chunks(config: ResultConfig):
     offset = 0
 
     if config.materialized_path is not None or config.cached_dataframe is not None:
-        full_df = _resolve_dataframe(config)
-        total_rows = len(full_df)
+        full_table = _resolve_arrow_table(config)
+        total_rows = full_table.num_rows
         while offset < total_rows:
             this_rows = min(rows_per_chunk, total_rows - offset)
-            chunk_df = full_df.iloc[offset : offset + this_rows]
-            table = pa.Table.from_pandas(chunk_df, preserve_index=False)
-            chunk = _encode_arrow_ipc_file(table, ipc_comp)
+            chunk = _encode_arrow_ipc_file(full_table.slice(offset, this_rows), ipc_comp)
             length_prefix = len(chunk).to_bytes(8, byteorder="big")
             yield length_prefix + chunk
             offset += this_rows

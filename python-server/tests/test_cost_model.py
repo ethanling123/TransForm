@@ -74,7 +74,8 @@ class CostModel(unittest.TestCase):
         self.assertIsNone(hints["brotli_bytes"])
 
     def test_compressible_data_on_a_slow_link_samples_every_codec(self):
-        hints = cost_model.estimate_hints(lambda: TEXT[:cost_model.SAMPLE_BYTES], len(TEXT), mbps=10)
+        # 1 Mbit/s keeps zstd's transfer time well above gzip's and brotli's extra compute on any machine
+        hints = cost_model.estimate_hints(lambda: TEXT[:cost_model.SAMPLE_BYTES], len(TEXT), mbps=1)
         self.assertEqual(hints["stage"], "sampled")
         for key in ("zstd_bytes", "gzip_bytes", "brotli_bytes"):
             self.assertLess(hints[key], len(TEXT))
