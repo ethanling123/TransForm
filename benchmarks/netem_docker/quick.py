@@ -111,6 +111,7 @@ async def main():
     parser.add_argument("--reps", type=int, default=REPS)
     parser.add_argument("--no-json", action="store_true", help="skip JSON, which is slow on a slow link")
     parser.add_argument("--breakdown", action="store_true", help="only time the pieces of one small blob fetch")
+    parser.add_argument("--learn", action="store_true", help="report a few downloads to the server, then let the selector choose")
     parser.add_argument("--tables", action="store_true", help="only time the selector on three larger uploaded tables")
     args = parser.parse_args()
     profile = os.environ.get("PROFILE", "unshaped")
@@ -138,6 +139,9 @@ async def main():
 
         if args.breakdown:
             await breakdown(session, client, record)
+            return _write(args.out, rows)
+        if args.learn:
+            await learn_link(session, client, record)
             return _write(args.out, rows)
         if args.tables:
             await larger_tables(session, client, record, args.reps)
@@ -173,6 +177,28 @@ async def main():
             record(name, "selector min_latency", runs[-1][2], runs[-1][0], statistics.median(r[1] for r in runs[1:]))
 
     _write(args.out, rows)
+
+
+async def learn_link(session, client, record):
+    """Report downloads to record_format_outcome, then run the unstructured selector with whatever the server learned."""
+    rid = (await client.post("http://localhost:8000/materialized-raw", content=os.urandom(1_000_000),
+                             headers={"Content-Type": "application/octet-stream"})).json()["result_id"]
+    estimate = None
+    for _ in range(4):
+        t = time.perf_counter()
+        body = (await client.get(f"http://localhost:8000/raw/{rid}")).content
+        seconds = time.perf_counter() - t
+        out = await session.call_tool("record_format_outcome", arguments={
+            "n_rows": 0, "n_cols": 0, "optimization_target": "min_latency", "format_used": "raw_blob",
+            "bytes": len(body), "latency_s": seconds})
+        estimate = (out.structuredContent or {}).get("link_mbps_estimate")
+    record("learned link", f"server estimate = {estimate if estimate is None else round(estimate, 1)} Mbit/s", "", 0, 0.0)
+    ns = Namespace(server_port=8000, port=8000)
+    text = b"".join(b'{"id":%d,"user":"user-%d","event":"click","path":"/item/%d"}\n' % (i, i % 300, i % 977) for i in range(9_000))
+    for name, data, mime in (("text 600 KB (compressible)", text, "text/plain"), ("bytes 1 MB (incompressible)", os.urandom(1_000_000), "application/octet-stream")):
+        for _ in range(2):
+            label, wire, latency, _, chosen, ok = await run_selector(session, client, ns, name, data, mime, "min_latency")
+        record(name, "selector min_latency", chosen, wire, latency)
 
 
 def larger_tables(session, client, record, reps):

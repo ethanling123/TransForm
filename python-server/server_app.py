@@ -73,6 +73,7 @@ from mcp.types import CallToolResult, TextContent  # type: ignore  # noqa: E402
 
 import arms  # noqa: E402
 import cost_model  # noqa: E402
+import link_estimator  # noqa: E402
 from arms import REGISTRY  # noqa: E402
 from format_selector import (  # noqa: E402
     OptimizationTarget,
@@ -2427,10 +2428,14 @@ def record_format_outcome(
     mab_state = load_mab_state(_SERVER_MAB_STATE_PATH)
     record_outcome(ctx, format_used=format_used, outcome=outcome, mab_state=mab_state)
     save_mab_state(mab_state, _SERVER_MAB_STATE_PATH)
+    link_estimator.observe(bytes, latency_s)
 
+    structured = {"recorded": True}
+    if link_estimator.enabled():
+        structured["link_mbps_estimate"] = link_estimator.estimate_mbps()
     return CallToolResult(
         content=[TextContent(type="text", text="Outcome recorded to server MAB state.")],
-        structured_content={"recorded": True},
+        structured_content=structured,
     )
 
 

@@ -23,6 +23,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Optional
 
+import link_estimator
+
 FormatName = Literal[
     "json",
     "parquet_blob",
@@ -153,10 +155,12 @@ def _get_network_mbps() -> float:
     """
     raw = os.environ.get("FORMAT_LATENCY_NETWORK_MBPS", "0").strip()
     try:
-        v = float(raw)
+        v = max(0.0, float(raw))
     except ValueError:
-        return 0.0
-    return max(0.0, v)
+        v = 0.0
+    if v <= 0.0 and link_estimator.enabled():  # no configured link speed: use what clients have reported
+        v = link_estimator.estimate_mbps() or 0.0
+    return v
 
 
 def _load_calibration_decode_ns() -> dict[str, float]:
