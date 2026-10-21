@@ -32,6 +32,8 @@ MCP endpoint: `http://localhost:8000/mcp/mcp`. The client and sweep scripts are 
 | `PARQUET_ENCODING_STRATEGY` | `default` | `data_driven` picks per-column encodings (the paper's setting) |
 | `ARROW_IPC_COMPRESSION` | `zstd` | `none`, `lz4` or `zstd`; a reader needs zstd support in its Arrow build (pyarrow has it) |
 | `FORMAT_COST_AWARE` | off | `1` enables the experimental cost-aware unstructured selector (`min_latency` only, needs `FORMAT_LATENCY_NETWORK_MBPS` > 0): sizes are sampled estimates, nothing is compressed to choose, and compute time is scored with transfer time (see `cost_model.py`) |
+| `FORMAT_INLINE_MAX_BYTES` | `0` (off) | experimental: a blob arm whose bytes are at most this many is returned inside the tool result's `_meta` (key `transform/inline`, base64 with a sha256) instead of behind a URL. Measured gain only up to about 100 KB on WAN and 50 KB on cellular; 65536 is a reasonable value. Hosts that forward `_meta` to the model would put the base64 in context |
+| `FORMAT_LATENCY_RTT_MS` | `0` | with a link speed set, inline only while the extra base64 transfer time is less than this round trip |
 | `FORMAT_SELECT_TARGET` | `min_latency` | `min_bytes`, `min_latency` or `min_time_to_first_rows` |
 | `FORMAT_LATENCY_NETWORK_MBPS` | `0` | link rate the latency target assumes; at 0 it falls back to bytes |
 | `SQLITE_QUERY_TIMEOUT_S` | `30` | queries slower than this are interrupted |

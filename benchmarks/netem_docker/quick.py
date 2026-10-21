@@ -82,6 +82,8 @@ async def table_formats(session, client, rid, n_rows, n_cols):
         chosen = out["chosen_format"]
         if chosen == "json":
             return len(json.dumps(out["payload"], separators=(",", ":")).encode()), -1, chosen
+        if "inline_bytes" in out:
+            return len(out["inline_bytes"]), -1, chosen + " inline"
         url = out["decode"]["url"]
         if chosen.endswith("_stream"):
             total = sum([len(c) + 8 async for c in fetch_stream_chunks(client, url)])
@@ -106,6 +108,7 @@ async def main():
     parser.add_argument("--out", default="results/netem_docker/quick.csv")
     parser.add_argument("--reps", type=int, default=REPS)
     parser.add_argument("--no-json", action="store_true", help="skip JSON, which is slow on a slow link")
+    parser.add_argument("--breakdown", action="store_true", help="only time the pieces of one small blob fetch")
     args = parser.parse_args()
     profile = os.environ.get("PROFILE", "unshaped")
     rows = []
@@ -130,6 +133,9 @@ async def main():
         record("link", "ping rtt (median)", "", 0, statistics.median(pings))
         record("link", f"4 MB download = {len(resp.content) * 8 / download_s / 1e6:.1f} Mbit/s", "", len(resp.content), download_s)
 
+        if args.breakdown:
+            await breakdown(session, client, record)
+            return _write(args.out, rows)
         up = await register_materialized(client, _parquet(uploaded_table(UPLOADED_ROWS)))
         for workload, rid, n_rows, n_cols in ((f"generated {SYNTHETIC_ROWS}x10", None, SYNTHETIC_ROWS, 10),
                                               (f"uploaded {UPLOADED_ROWS}x6 mixed", up["result_id"], up["n_rows"], up["n_cols"])):
@@ -160,11 +166,53 @@ async def main():
                 runs.append((wire, latency, chosen))
             record(name, "selector min_latency", runs[-1][2], runs[-1][0], statistics.median(r[1] for r in runs[1:]))
 
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    with open(args.out, "w", newline="") as f:
+    _write(args.out, rows)
+
+
+def _write(out, rows):
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["profile", "workload", "strategy", "arm", "wire_bytes", "seconds"])
         w.writerows(rows)
+
+
+async def breakdown(session, client, record):
+    """Where the time of a small result goes: the tool call, the first fetch, a repeat fetch on the same connection,
+    and a fetch on a brand-new connection (the cost an inline arm would avoid)."""
+    for label, n in (("small 2K rows", 2_000), ("5K rows", 5_000), ("10K rows", 10_000), ("medium 20K rows", 20_000)):
+        up = await register_materialized(client, _parquet(uploaded_table(n)))
+        rid = up["result_id"]
+        await call_large_parquet_blob(session, n, 6, result_id=rid)  # warm the server's caches
+        calls, firsts, repeats, fresh = [], [], [], []
+        for _ in range(5):
+            t = time.perf_counter()
+            desc = await call_large_parquet_blob(session, n, 6, result_id=rid)
+            calls.append(time.perf_counter() - t)
+            t = time.perf_counter()
+            data = await fetch_blob(client, desc["url"])
+            firsts.append(time.perf_counter() - t)
+            t = time.perf_counter()
+            await fetch_blob(client, desc["url"])
+            repeats.append(time.perf_counter() - t)
+            async with httpx.AsyncClient(timeout=60) as new_client:
+                t = time.perf_counter()
+                await fetch_blob(new_client, desc["url"])
+                fresh.append(time.perf_counter() - t)
+        pings = []
+        for _ in range(5):
+            t = time.perf_counter()
+            await session.send_ping()
+            pings.append(time.perf_counter() - t)
+        m = statistics.median
+        record(f"breakdown {label}", "mcp ping", "", 0, m(pings))
+        record(f"breakdown {label}", "tool call (descriptor)", "", 0, m(calls))
+        record(f"breakdown {label}", "fetch, reused connection", "", len(data), m(firsts))
+        record(f"breakdown {label}", "fetch, repeat same connection", "", len(data), m(repeats))
+        record(f"breakdown {label}", "fetch, new connection", "", len(data), m(fresh))
+        selector = [x for x in await table_formats(session, client, rid, n, 6) if x[0].startswith("selector")][0][1]
+        runs = [await timed(selector, n) for _ in range(5)]
+        record(f"breakdown {label}", "selector call + fetch/inline", runs[-1][2], runs[-1][0], m(r[1] for r in runs))
 
 
 def _parquet(table: pa.Table) -> bytes:

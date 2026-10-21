@@ -15,6 +15,7 @@ This exposes:
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import gzip
 import hashlib
@@ -1932,6 +1933,53 @@ def describe_and_fetch_result(
     )
 
 
+
+# ----- Inline binary transport (experimental) -------------------------------------
+# A blob arm normally costs the tool call plus a second request to fetch the bytes. For a small payload the bytes can ride
+# in the tool result instead, in `_meta` (not in the content a host shows the model), saving the descriptor round trip
+# and a connection. Off unless FORMAT_INLINE_MAX_BYTES > 0.
+INLINE_META_KEY = "transform/inline"
+
+
+def _inline_limit_bytes() -> int:
+    try:
+        return max(0, int(os.environ.get("FORMAT_INLINE_MAX_BYTES", "0").strip() or 0))
+    except ValueError:
+        return 0
+
+
+def _should_inline(encoded_bytes: int) -> bool:
+    limit = _inline_limit_bytes()
+    if limit <= 0 or encoded_bytes > limit:
+        return False
+    try:
+        rtt_ms = float(os.environ.get("FORMAT_LATENCY_RTT_MS", "0").strip() or 0)
+    except ValueError:
+        rtt_ms = 0.0
+    mbps = _get_network_mbps()
+    if rtt_ms > 0 and mbps > 0:
+        # base64 adds a third; inline while that extra transfer costs less than the round trip it saves
+        return 0.34 * encoded_bytes * 8 / (mbps * 1e6) < rtt_ms / 1000
+    return True
+
+
+def _maybe_inline(result: CallToolResult, get_data, size_hint: Optional[int], mime: str) -> CallToolResult:
+    """Return *result* with the payload bytes attached in `_meta` when the arm is small enough, else unchanged."""
+    if size_hint is not None and not _should_inline(int(size_hint)):
+        return result
+    if size_hint is None and _inline_limit_bytes() <= 0:
+        return result
+    data = get_data()
+    if data is None or not _should_inline(len(data)):
+        return result
+    structured = dict(result.structured_content or {})
+    structured["decode"] = {**structured.get("decode", {}), "transport": "inline_meta", "meta_key": INLINE_META_KEY,
+                            "bytes": len(data)}
+    meta = {INLINE_META_KEY: {"encoding": "base64", "mime_type": mime, "bytes": len(data),
+                              "sha256": hashlib.sha256(data).hexdigest(), "data": base64.b64encode(data).decode("ascii")}}
+    return CallToolResult(content=result.content, structured_content=structured, _meta=meta)
+
+
 @mcp.tool()
 def large_result_auto(
     n_rows: int,
@@ -2025,9 +2073,12 @@ def large_result_auto(
                         "uncompressed_bytes": int(unstructured["raw_bytes"]),
                     },
                 }
-                return CallToolResult(
-                    content=[TextContent(type="text", text=f"Returning {codec} blob descriptor ({chosen}): {url}")],
-                    structured_content=structured,
+                return _maybe_inline(
+                    CallToolResult(
+                        content=[TextContent(type="text", text=f"Returning {codec} blob descriptor ({chosen}): {url}")],
+                        structured_content=structured,
+                    ),
+                    lambda: _raw_codec_blob(cfg, result_id, chosen), None, mime,
                 )
 
             if chosen == "gzip_blob":
@@ -2061,9 +2112,12 @@ def large_result_auto(
                         "content_encoding": "gzip",
                     },
                 }
-                return CallToolResult(
-                    content=[TextContent(type="text", text=f"Returning gzip blob descriptor (gzip_blob): {descriptor['url']}")],
-                    structured_content=structured,
+                return _maybe_inline(
+                    CallToolResult(
+                        content=[TextContent(type="text", text=f"Returning gzip blob descriptor (gzip_blob): {descriptor['url']}")],
+                        structured_content=structured,
+                    ),
+                    lambda: _raw_gzip_blob(cfg, result_id), None, descriptor["mime_type"],
                 )
 
             # raw_blob default
@@ -2096,9 +2150,12 @@ def large_result_auto(
                     "mime_type": descriptor["mime_type"],
                 },
             }
-            return CallToolResult(
-                content=[TextContent(type="text", text=f"Returning raw blob descriptor (raw_blob): {descriptor['url']}")],
-                structured_content=structured,
+            return _maybe_inline(
+                CallToolResult(
+                    content=[TextContent(type="text", text=f"Returning raw blob descriptor (raw_blob): {descriptor['url']}")],
+                    structured_content=structured,
+                ),
+                lambda: cfg.raw_path.read_bytes(), int(unstructured["raw_bytes"]), descriptor["mime_type"],
             )
 
     # Tabular branch.
@@ -2226,9 +2283,13 @@ def large_result_auto(
             "payload": {"kind": "descriptor", **desc},
             "decode": {"encoding": "arrow_ipc", "transport": "http_blob", "url": desc.get("url")},
         }
-        return CallToolResult(
-            content=[TextContent(type="text", text=f"Returning Arrow IPC blob descriptor (arrow_ipc_blob): {desc.get('url')}")],
-            structured_content=structured,
+        return _maybe_inline(
+            CallToolResult(
+                content=[TextContent(type="text", text=f"Returning Arrow IPC blob descriptor (arrow_ipc_blob): {desc.get('url')}")],
+                structured_content=structured,
+            ),
+            lambda: _ipc_blob_data(RESULT_REGISTRY[desc["id"]], desc["id"]),
+            hints_for_select["arrow_ipc_bytes"], "application/vnd.apache.arrow.file",
         )
 
     # parquet_blob default
@@ -2246,9 +2307,13 @@ def large_result_auto(
         "payload": {"kind": "descriptor", **desc},
         "decode": {"encoding": "parquet", "transport": "http_blob", "url": desc.get("url")},
     }
-    return CallToolResult(
-        content=[TextContent(type="text", text=f"Returning Parquet blob descriptor (parquet_blob): {desc.get('url')}")],
-        structured_content=structured,
+    return _maybe_inline(
+        CallToolResult(
+            content=[TextContent(type="text", text=f"Returning Parquet blob descriptor (parquet_blob): {desc.get('url')}")],
+            structured_content=structured,
+        ),
+        lambda: _parquet_blob_data(RESULT_REGISTRY[desc["id"]], desc["id"]),
+        hints_for_select["parquet_bytes"], "application/octet-stream",
     )
 
 
@@ -2646,6 +2711,18 @@ def _get_config_or_404(result_id: str) -> ResultConfig:
     return config
 
 
+def _parquet_blob_data(config: ResultConfig, result_id: str) -> bytes:
+    comp = config.compression or _get_default_compression()
+    enc_strat = config.encoding_strategy or _get_default_encoding_strategy()
+    if config.cached_parquet_blob_bytes is not None and config.cached_parquet_codec == (comp, enc_strat):
+        # F7: serve pre-encoded Parquet bytes from registration.
+        _payload_cache_touch(result_id)
+        return config.cached_parquet_blob_bytes
+    if config.materialized_path is not None:
+        return _encode_parquet(_resolve_arrow_table(config), comp, enc_strat)
+    return _get_parquet_blob_bytes(config.n_rows, config.n_cols, comp, enc_strat)
+
+
 async def parquet_blob_endpoint(request) -> Response:
     """Return a single Parquet file representing the full dataset."""
 
@@ -2656,19 +2733,7 @@ async def parquet_blob_endpoint(request) -> Response:
 
     comp = config.compression or _get_default_compression()
     enc_strat = config.encoding_strategy or _get_default_encoding_strategy()
-
-    if (
-        config.cached_parquet_blob_bytes is not None
-        and config.cached_parquet_codec == (comp, enc_strat)
-    ):
-        # F7: serve pre-encoded Parquet bytes from registration.
-        data = config.cached_parquet_blob_bytes
-        _payload_cache_touch(result_id)
-    elif config.materialized_path is not None:
-        table = _resolve_arrow_table(config)
-        data = _encode_parquet(table, comp, enc_strat)
-    else:
-        data = _get_parquet_blob_bytes(config.n_rows, config.n_cols, comp, enc_strat)
+    data = _parquet_blob_data(config, result_id)
 
     headers = {
         "X-Benchmark-Rows": str(config.n_rows),
@@ -2750,6 +2815,19 @@ async def parquet_stream_endpoint(request) -> StreamingResponse:
     )
 
 
+def _ipc_blob_data(config: ResultConfig, result_id: str) -> bytes:
+    ipc_comp = config.ipc_compression or _get_default_arrow_ipc_compression()
+    if ipc_comp not in VALID_ARROW_IPC_COMPRESSIONS:
+        ipc_comp = "none"
+    if config.cached_arrow_ipc_blob_bytes is not None and config.cached_arrow_ipc_codec == ipc_comp:
+        # F7: serve pre-encoded Arrow IPC bytes from registration.
+        _payload_cache_touch(result_id)
+        return config.cached_arrow_ipc_blob_bytes
+    if config.materialized_path is not None:
+        return _encode_arrow_ipc_file(_resolve_arrow_table(config), ipc_comp)
+    return _get_arrow_ipc_blob_bytes(config.n_rows, config.n_cols, ipc_comp)
+
+
 async def ipc_blob_endpoint(request) -> Response:
     """Return a single Arrow IPC file representing the full dataset."""
 
@@ -2761,21 +2839,7 @@ async def ipc_blob_endpoint(request) -> Response:
     ipc_comp = config.ipc_compression or _get_default_arrow_ipc_compression()
     if ipc_comp not in VALID_ARROW_IPC_COMPRESSIONS:
         ipc_comp = "none"
-
-    if (
-        config.cached_arrow_ipc_blob_bytes is not None
-        and config.cached_arrow_ipc_codec == ipc_comp
-    ):
-        # F7: serve pre-encoded Arrow IPC bytes from registration.
-        data = config.cached_arrow_ipc_blob_bytes
-        _payload_cache_touch(result_id)
-    elif config.materialized_path is not None:
-        table = _resolve_arrow_table(config)
-        data = _encode_arrow_ipc_file(table, ipc_comp)
-    else:
-        data = _get_arrow_ipc_blob_bytes(
-            config.n_rows, config.n_cols, ipc_comp,
-        )
+    data = _ipc_blob_data(config, result_id)
 
     headers = {
         "X-Benchmark-Rows": str(config.n_rows),

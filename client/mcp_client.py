@@ -8,6 +8,9 @@ LLM-backed workflow.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+
 import os
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, Optional
@@ -306,6 +309,12 @@ async def call_large_result_auto(
     data = result.structuredContent or {}
     if not isinstance(data, dict):
         raise RuntimeError(f"Unexpected structured_content from large_result_auto: {data}")
+    inline = (getattr(result, "meta", None) or {}).get("transform/inline")
+    if inline:  # the server sent the bytes in _meta instead of behind a URL (FORMAT_INLINE_MAX_BYTES)
+        payload = base64.b64decode(inline["data"])
+        if hashlib.sha256(payload).hexdigest() != inline["sha256"]:
+            raise RuntimeError("inline payload failed its sha256 check")
+        data = {**data, "inline_bytes": payload}
     return data
 
 

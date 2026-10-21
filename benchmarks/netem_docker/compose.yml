@@ -12,6 +12,7 @@ services:
       TRANSFORM_SCRATCH_DIR: /scratch
       FORMAT_LATENCY_NETWORK_MBPS: ${NETEM_RATE_MBIT:-0}
       FORMAT_COST_AWARE: ${FORMAT_COST_AWARE:-}
+      FORMAT_INLINE_MAX_BYTES: ${FORMAT_INLINE_MAX_BYTES:-}
       PARQUET_ENCODING_STRATEGY: data_driven
     working_dir: /scratch
     tmpfs: [/scratch]
