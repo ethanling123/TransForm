@@ -1,0 +1,9 @@
+.git
+.venv
+python-server/.venv
+data
+results
+java-server
+docs
+**/__pycache__
+**/*.pyc

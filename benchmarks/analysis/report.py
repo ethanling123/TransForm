@@ -308,6 +308,8 @@ def main():
     defaults = generated_block("defaults/defaults.md")
     cost_aware = generated_block("payloads_cost_aware/summary.md")
     paper_repro = generated_block("paper_repro/comparison.md")
+    run_module("benchmarks.analysis.netem_docker")
+    netem_docker = generated_block("netem_docker/summary.md")
     attacks_table, attacks_evidence = attacks_section()
 
     text = f"""# TransForm: Python server restoration, results and benchmark checks
@@ -534,6 +536,24 @@ nothing has been built or measured to prevent them.
 
 {attacks_evidence}
 
+### 16. A real network between two machines (quick check)
+
+A short test with a real kernel network path instead of the software proxy of section 4: a server container and a client
+container on one private network (`benchmarks/netem_docker/`), each shaping its own outgoing traffic with Linux `tc netem`
+(delay, rate cap, packet loss), so TCP slow start, retransmits and window limits are real. The paper's four profiles are
+used, the delay is applied on both machines (a round trip is twice the stated delay) and both directions get the rate
+cap. The client opens its own `localhost:8000` onto the server over the shaped link, because the server's descriptors
+name `localhost`. The test is minimal on purpose: four checks that finish in minutes, with a median of two timed runs
+after a warm-up (`benchmarks/scripts/run_netem_docker.sh`, about 10 minutes for all profiles).
+
+Caveats: containers are separate network stacks inside Docker's Linux VM, not separate VMs; there is no competing
+traffic; two repetitions are few on the lossy links. A rerun of the cellular profile with six repetitions (no JSON)
+gave 2.07 s for the uploaded table as Parquet and 2.02 s for the selector, against 1.55 s and 2.03 s in the table
+below, and 3.28 s against 2.15 s for Arrow IPC, so differences under about a second on the cellular and bad-wifi rows
+are noise.
+
+{netem_docker}
+
 ## Findings
 
 - On every dataset here the selector sends the fewest bytes of any strategy (tied with always-Parquet on TPC-DS, where it
@@ -589,6 +609,11 @@ nothing has been built or measured to prevent them.
   residual is within run-to-run noise (the text figure is below the best fixed arm). Two causes of overhead were found
   and fixed: the codec calibration ran on the first request (about 0.17 s) and gzip and brotli were sampled on a LAN
   where they cannot beat zstd. A first version without those fixes measured 1.43x and 1.45x on LAN images and text.
+- **Real network, two containers (section 16).** With kernel-shaped links a 4 MB download reached 35% (LAN), 55% (WAN),
+  80% (cellular) and 58% (bad wifi) of the configured rate, so slow start, round-trip time and loss cost more than a
+  software proxy shows. The selector was within noise of the fastest forced option in every cell: Parquet for the generated
+  table on every link, Parquet for the uploaded table except on the LAN (where it chose Arrow IPC, 10 ms slower), brotli
+  for compressible text, and raw for incompressible bytes. JSON for the 6.6 MB uploaded table took 50 s on bad wifi against 2.7 s as Parquet.
 - **Table codec defaults (section 12).** zstd for Parquet and Arrow IPC cuts bytes 13% to 40% (Parquet) and 74% to 91%
   (Arrow IPC) on BIRD, with total latency within 4% on localhost, LAN and WAN for the typical query. On BIRD results above
   50K cells over cellular, Arrow IPC went from 19.0 s to 5.2 s (5 queries). On TPC-DS the min_bytes and min_latency selector's total latency
@@ -635,6 +660,7 @@ SKIP_JAVA=1 benchmarks/scripts/run_all.sh     # Python server only
 # not part of run_all.sh:
 benchmarks/scripts/run_paper_repro.sh         # section 14 (the paper's harness; SERVER=java for the Java rerun)
 benchmarks/scripts/run_attacks.sh             # section 15
+benchmarks/scripts/run_netem_docker.sh        # section 16 (needs Docker running)
 benchmarks/scripts/run_defaults.sh            # section 12 (BIRD); run_defaults_tpcds.sh for TPC-DS
 benchmarks/scripts/run_lossy.sh               # section 10 (needs ollama with qwen2.5vl:7b and mlx-whisper)
 benchmarks/scripts/run_payloads_cost_aware.sh # section 13

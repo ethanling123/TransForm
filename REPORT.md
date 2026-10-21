@@ -919,6 +919,76 @@ nothing has been built or measured to prevent them.
 - **T8** NOT_REPRODUCED: scanned 3 tool outputs and errors for the bearer key: found in none; server filesystem paths in none. The risk here is on the client: its HTTP client attaches the key to every URL it fetches (T6), not that the key enters the model's context
 - **T9** VULNERABLE: inline text payload kind=text, inline table payload kind=json; injected closing tag and instruction passed through verbatim in both: [True, True]; any untrusted-data marking in the response: [False, False]
 
+### 16. A real network between two machines (quick check)
+
+A short test with a real kernel network path instead of the software proxy of section 4: a server container and a client
+container on one private network (`benchmarks/netem_docker/`), each shaping its own outgoing traffic with Linux `tc netem`
+(delay, rate cap, packet loss), so TCP slow start, retransmits and window limits are real. The paper's four profiles are
+used, the delay is applied on both machines (a round trip is twice the stated delay) and both directions get the rate
+cap. The client opens its own `localhost:8000` onto the server over the shaped link, because the server's descriptors
+name `localhost`. The test is minimal on purpose: four checks that finish in minutes, with a median of two timed runs
+after a warm-up (`benchmarks/scripts/run_netem_docker.sh`, about 10 minutes for all profiles).
+
+Caveats: containers are separate network stacks inside Docker's Linux VM, not separate VMs; there is no competing
+traffic; two repetitions are few on the lossy links. A rerun of the cellular profile with six repetitions (no JSON)
+gave 2.07 s for the uploaded table as Parquet and 2.02 s for the selector, against 1.55 s and 2.03 s in the table
+below, and 3.28 s against 2.15 s for Arrow IPC, so differences under about a second on the cellular and bad-wifi rows
+are noise.
+
+#### Link check
+
+Round trip of an MCP ping (it includes opening a connection and the HTTP exchange, so it is more than the shaped round trip) and the rate of one 4 MB download against the configured cap.
+
+| profile | MCP ping | 4 MB download | share of the cap |
+|---|---|---|---|
+| unshaped | 44 ms | 4657 Mbit/s | - |
+| LAN 1 ms, 1 Gbit | 52 ms | 347 Mbit/s | 35% |
+| WAN 40 ms, 50 Mbit | 218 ms | 28 Mbit/s | 55% |
+| cellular 80 ms, 10 Mbit, 0.1% loss | 376 ms | 8 Mbit/s | 80% |
+| bad wifi 30 ms, 5 Mbit, 1% loss | 183 ms | 3 Mbit/s | 58% |
+
+#### Latency by workload and profile
+
+Seconds to fetch and decode (median of two runs after a warm-up), with the bytes that crossed the link. Rows named `selector` show the arm the selector chose.
+
+#### generated 50000x10
+
+| strategy | wire | unshaped | LAN 1 ms, 1 Gbit | WAN 40 ms, 50 Mbit | cellular 80 ms, 10 Mbit, 0.1% loss | bad wifi 30 ms, 5 Mbit, 1% loss |
+|---|---|---|---|---|---|---|
+| json | 8,063 KB | 1.23 s | 1.34 s | 4.95 s | 25.73 s | 75.15 s |
+| parquet_blob | 9 KB | 0.05 s | 0.05 s | 0.31 s | 0.56 s | 0.37 s |
+| arrow_ipc_blob | 559 KB | 0.10 s | 0.06 s | 0.48 s | 1.02 s | 1.96 s |
+| selector min_latency | 9 KB | 0.05 s (parquet_blob) | 0.06 s (parquet_blob) | 0.31 s (parquet_blob) | 0.55 s (parquet_blob) | 0.27 s (parquet_blob) |
+
+#### uploaded 50000x6 mixed
+
+| strategy | wire | unshaped | LAN 1 ms, 1 Gbit | WAN 40 ms, 50 Mbit | cellular 80 ms, 10 Mbit, 0.1% loss | bad wifi 30 ms, 5 Mbit, 1% loss |
+|---|---|---|---|---|---|---|
+| json | 6,623 KB | 1.09 s | 1.19 s | 4.05 s | 27.82 s | 50.02 s |
+| parquet_blob | 1,146 KB | 0.05 s | 0.06 s | 0.56 s | 1.55 s | 2.66 s |
+| arrow_ipc_blob | 1,522 KB | 0.05 s | 0.07 s | 0.62 s | 2.15 s | 4.70 s |
+| selector min_latency | 1,146 KB | 0.05 s (parquet_blob) | 0.07 s (arrow_ipc_blob) | 0.55 s (parquet_blob) | 2.03 s (parquet_blob) | 3.60 s (parquet_blob) |
+
+#### text 600 KB (compressible)
+
+| strategy | wire | unshaped | LAN 1 ms, 1 Gbit | WAN 40 ms, 50 Mbit | cellular 80 ms, 10 Mbit, 0.1% loss | bad wifi 30 ms, 5 Mbit, 1% loss |
+|---|---|---|---|---|---|---|
+| raw | 579 KB | 0.08 s | 0.06 s | 0.42 s | 3.51 s | 2.78 s |
+| gzip | 51 KB | 0.05 s | 0.06 s | 0.32 s | 0.92 s | 0.50 s |
+| zstd | 31 KB | 0.08 s | 0.05 s | 0.25 s | 0.74 s | 0.36 s |
+| brotli | 19 KB | 0.06 s | 0.06 s | 0.31 s | 0.73 s | 0.35 s |
+| selector min_latency | 19 KB | 0.06 s (brotli_blob) | 0.07 s (brotli_blob) | 0.33 s (brotli_blob) | 0.75 s (brotli_blob) | 0.36 s (brotli_blob) |
+
+#### bytes 1 MB (incompressible)
+
+| strategy | wire | unshaped | LAN 1 ms, 1 Gbit | WAN 40 ms, 50 Mbit | cellular 80 ms, 10 Mbit, 0.1% loss | bad wifi 30 ms, 5 Mbit, 1% loss |
+|---|---|---|---|---|---|---|
+| raw | 1,000 KB | 0.05 s | 0.06 s | 0.52 s | 2.79 s | 3.54 s |
+| gzip | 1,000 KB | 0.06 s | 0.08 s | 0.59 s | 3.15 s | 4.48 s |
+| zstd | 1,000 KB | 0.04 s | 0.06 s | 0.53 s | 3.01 s | 2.58 s |
+| brotli | 1,000 KB | 0.05 s | 0.06 s | 0.51 s | 2.25 s | 3.95 s |
+| selector min_latency | 1,000 KB | 0.06 s (raw_blob) | 0.08 s (raw_blob) | 0.54 s (raw_blob) | 2.31 s (raw_blob) | 3.06 s (raw_blob) |
+
 ## Findings
 
 - On every dataset here the selector sends the fewest bytes of any strategy (tied with always-Parquet on TPC-DS, where it
@@ -977,6 +1047,11 @@ nothing has been built or measured to prevent them.
   residual is within run-to-run noise (the text figure is below the best fixed arm). Two causes of overhead were found
   and fixed: the codec calibration ran on the first request (about 0.17 s) and gzip and brotli were sampled on a LAN
   where they cannot beat zstd. A first version without those fixes measured 1.43x and 1.45x on LAN images and text.
+- **Real network, two containers (section 16).** With kernel-shaped links a 4 MB download reached 35% (LAN), 55% (WAN),
+  80% (cellular) and 58% (bad wifi) of the configured rate, so slow start, round-trip time and loss cost more than a
+  software proxy shows. The selector was within noise of the fastest forced option in every cell: Parquet for the generated
+  table on every link, Parquet for the uploaded table except on the LAN (where it chose Arrow IPC, 10 ms slower), brotli
+  for compressible text, and raw for incompressible bytes. JSON for the 6.6 MB uploaded table took 50 s on bad wifi against 2.7 s as Parquet.
 - **Table codec defaults (section 12).** zstd for Parquet and Arrow IPC cuts bytes 13% to 40% (Parquet) and 74% to 91%
   (Arrow IPC) on BIRD, with total latency within 4% on localhost, LAN and WAN for the typical query. On BIRD results above
   50K cells over cellular, Arrow IPC went from 19.0 s to 5.2 s (5 queries). On TPC-DS the min_bytes and min_latency selector's total latency
@@ -1023,6 +1098,7 @@ SKIP_JAVA=1 benchmarks/scripts/run_all.sh     # Python server only
 # not part of run_all.sh:
 benchmarks/scripts/run_paper_repro.sh         # section 14 (the paper's harness; SERVER=java for the Java rerun)
 benchmarks/scripts/run_attacks.sh             # section 15
+benchmarks/scripts/run_netem_docker.sh        # section 16 (needs Docker running)
 benchmarks/scripts/run_defaults.sh            # section 12 (BIRD); run_defaults_tpcds.sh for TPC-DS
 benchmarks/scripts/run_lossy.sh               # section 10 (needs ollama with qwen2.5vl:7b and mlx-whisper)
 benchmarks/scripts/run_payloads_cost_aware.sh # section 13
