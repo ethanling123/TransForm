@@ -310,6 +310,12 @@ def main():
     paper_repro = generated_block("paper_repro/comparison.md")
     run_module("benchmarks.analysis.netem_docker")
     netem_docker = generated_block("netem_docker/summary.md")
+    run_module("benchmarks.analysis.data_plane")
+    data_plane = generated_block("netem_docker/data_plane.md")
+    stream_fix = run_module("benchmarks.analysis.stream_fix")
+    model_aware = generated_block("model_aware/summary.md")
+    bandit = generated_block("payloads/bandit_replay.md")
+    reuse = generated_block("data_plane/reuse_census.md")
     attacks_table, attacks_evidence = attacks_section()
 
     text = f"""# TransForm: Python server restoration, results and benchmark checks
@@ -554,6 +560,80 @@ are noise.
 
 {netem_docker}
 
+### 17. Seven data-plane experiments
+
+Seven ideas for making the data layer faster, each built, tested and measured on its own. Verdicts first, evidence below.
+
+| # | idea | verdict |
+|---|---|---|
+| 1 | stream arms slice the cached Arrow table instead of converting a pandas slice per chunk | **worked**: TPC-DS streams 9.8 s to 1.0 s (Parquet) and 8.7 s to 0.19 s (Arrow IPC); Parquet streams carry 6.5% more bytes |
+| 2 | small payloads ride in the tool result's `_meta` (`FORMAT_INLINE_MAX_BYTES`) | **works for small payloads only**: 21 to 28% faster at 48 KB on WAN and cellular and 24% at 118 KB on WAN; slower at 118 KB on cellular and from about 230 KB on |
+| 3 | table codec and level chosen per link from a row sample (`FORMAT_COST_AWARE`) | **no gain**: the zstd default is within 3% of the best arm from 1 Mbit/s to 1 Gbit/s on three table shapes |
+| 4 | model-aware arms behind a `consumer` hint (image scaled to the vision limits, 16 kHz audio) | **works, opt-in**: 33% of the M3-Bench images scaled, image bytes 68% of the original; audio 36% |
+| 5 | link speed learned from client reports; contextual bandit | **link speed works**; **bandit**: keyed by link it beats the best single arm in a per-draw replay (1.16x against 1.28x), not in a latency-weighted one |
+| 6 | parallel byte-range downloads | **no gain**: a single connection reached 87% of the WAN cap on 8 MB; extra connections were slower |
+| 7 | conditional fetch (`ETag` and `If-None-Match`) | **works when results repeat, which BIRD results rarely do**: 89 to 96% less time on a repeat, but repeated results are 0.9% of the bytes of the BIRD dev gold set |
+
+#### 1. Stream arms
+
+The profile of a 500K x 34 Parquet stream showed 5.5 of 5.9 s spent in `Table.from_pandas`, once per chunk, because the
+stream path converted a DataFrame slice for every chunk while the blob arms serve bytes encoded at registration. The
+streams now slice the cached Arrow table and derive the data-driven encodings once for the whole table. The "before"
+figure is therefore encoding per request against a pre-encoded cache, not streaming as such. Golden byte digests of the
+registry fixture are unchanged, and a new test decodes the chunks of both stream arms back to the registered rows.
+Before and after are separate runs on the same machine (the blob rows moved by about 25% between them, which is the noise
+to expect). Time to first rows rose on the largest Parquet cell (0.13 s to 0.18 s), because the encodings for the whole table
+are now chosen before the first chunk is sent.
+
+{stream_fix}
+
+#### 2. Inline bytes in the tool result
+
+An MCP tool call costs about two round trips plus 44 ms of fixed overhead on these links (a 224 ms ping on WAN, whose round
+trip is 80 ms), and fetching the blob costs a further 140 to 190 ms there, so a small result takes about 0.4 s. With `FORMAT_INLINE_MAX_BYTES` set, a blob arm at or below that size
+comes back inside the tool result's `_meta` (base64 with a sha256 the client checks) and the descriptor URL still serves
+the same bytes. The bytes go in `_meta` and not in the content a host shows the model, but a host that forwards `_meta`
+to the model would put the base64 into context. Off by default; 65536 is the suggested value.
+
+#### 3 to 7. Experiments in the two-container network
+
+{data_plane}
+
+Item 3 is not in the table because nothing changed: with the arm choice switched on, the three table shapes (200K x 6
+mixed, 50K x 20 random numeric, 200K x 8 categorical) kept the default on every link, and the offline costs agree
+(`cost_model.choose_table_arm`: the best alternative, zstd level 9 at 1 Mbit/s, was 3% cheaper than the default, under
+the 5% switch threshold). Run-to-run noise on the lossy links is large: the same cellular fetch took 8.3 s in one run
+and 4.5 s in another with identical bytes.
+
+#### 4. Model-aware arms on the real files
+
+{model_aware}
+
+The image count scaled is higher than the 21% above 1568 px quoted in section 10, because the 1568 visual-token limit
+also binds on images whose long edge is under 1568 px. "Tokens the model sees" are equal by construction here (the
+provider downscales an oversized image to the same limits), and the scaling is Pillow's, not the provider's. The audio arm
+leaves word error rate unchanged in section 10 (`wav-16k`, clean and noisy). The `consumer` argument exists only on this
+server's `large_result_auto`, so its tool schema no longer matches the Java server's.
+
+#### 5. Learned link speed and a bandit replay
+
+The server learns an effective throughput (median of the last ten reported downloads of at least 200 KB) when
+`FORMAT_LEARN_LINK=1` and no link speed is configured; clients report through `record_format_outcome`. It is one estimate
+for the whole server. The estimates in the table above are what 1 MB downloads achieved, below the caps because of slow
+start. The bandit replay uses the logged unstructured payload runs of section 8, where every arm's latency is known, so
+the feedback of an epsilon-greedy policy can be replayed. It is a replay of single measurements on a small set, not an
+online result.
+
+{bandit}
+
+The existing bandit keys on the optimization target only, which is the `global` row. Keyed by link it ends at 1.16x
+against 2.47x for the global table in the per-draw view; weighted by latency, no policy beats the best single arm, because the slow links
+dominate the total and every arm is close there.
+
+#### 7. How often results repeat
+
+{reuse}
+
 ## Findings
 
 - On every dataset here the selector sends the fewest bytes of any strategy (tied with always-Parquet on TPC-DS, where it
@@ -614,6 +694,11 @@ are noise.
   software proxy shows. The selector was within noise of the fastest forced option in every cell: Parquet for the generated
   table on every link, Parquet for the uploaded table except on the LAN (where it chose Arrow IPC, 10 ms slower), brotli
   for compressible text, and raw for incompressible bytes. JSON for the 6.6 MB uploaded table took 50 s on bad wifi against 2.7 s as Parquet.
+- **Seven data-plane experiments (section 17).** Stream delivery (9x to 45x faster on TPC-DS) and the opt-in
+  image and audio arms (68% and 36% of the bytes) paid clearly; inline bytes (small payloads only) and the learned link
+  speed (it matched the configured choices) paid narrowly; table codec choice and parallel ranges did not pay; a bandit
+  keyed by link beat the best single arm only when each draw counts equally; conditional fetch saves 89 to 96% of a repeat
+  but results repeat in 10.9% of the BIRD dev gold queries and 0.9% of its bytes.
 - **Table codec defaults (section 12).** zstd for Parquet and Arrow IPC cuts bytes 13% to 40% (Parquet) and 74% to 91%
   (Arrow IPC) on BIRD, with total latency within 4% on localhost, LAN and WAN for the typical query. On BIRD results above
   50K cells over cellular, Arrow IPC went from 19.0 s to 5.2 s (5 queries). On TPC-DS the min_bytes and min_latency selector's total latency
@@ -660,7 +745,8 @@ SKIP_JAVA=1 benchmarks/scripts/run_all.sh     # Python server only
 # not part of run_all.sh:
 benchmarks/scripts/run_paper_repro.sh         # section 14 (the paper's harness; SERVER=java for the Java rerun)
 benchmarks/scripts/run_attacks.sh             # section 15
-benchmarks/scripts/run_netem_docker.sh        # section 16 (needs Docker running)
+benchmarks/scripts/run_netem_docker.sh        # section 16 (needs Docker running); see its QUICK_ARGS for section 17
+benchmarks/scripts/run_tpcds_once.sh <csv>   # section 17, item 1
 benchmarks/scripts/run_defaults.sh            # section 12 (BIRD); run_defaults_tpcds.sh for TPC-DS
 benchmarks/scripts/run_lossy.sh               # section 10 (needs ollama with qwen2.5vl:7b and mlx-whisper)
 benchmarks/scripts/run_payloads_cost_aware.sh # section 13
