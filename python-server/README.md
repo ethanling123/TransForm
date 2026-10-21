@@ -82,3 +82,14 @@ level, transport, `selectable`). The selector and the bandit only see selectable
 - A query that returns zero rows is rejected ("Empty result"); there is nothing to transport.
 - Gold queries slower than the timeout fail (BIRD dev 518 and 701 take 32 s and 168 s in plain SQLite).
 - The security gaps listed in `../REPORT.md` (shared bearer key, no result expiry, wide-open CORS) are unchanged.
+
+## Model-aware arms (experimental, Python only)
+
+`large_result_auto` takes an optional `consumer`: `"vision"` returns an image scaled to a vision model's input limits
+(long edge 1568 px and 1568 visual tokens, the Claude standard tier; the original is kept when scaling would not make the
+file smaller), `"asr"` returns 16 kHz mono 16-bit WAV. The arms are `image_fit_blob` and `audio_16k_blob`, registered
+as lossy and never chosen by the selector. They need Pillow (in `requirements.txt`) and `ffmpeg` on the PATH. The extra
+argument exists only in this server, so the tool schema no longer matches the Java server's for `large_result_auto`. The
+provider's own resampler differs from Pillow's, so "the model sees the same thing" is approximate. Measured on the 212
+M3-Bench images and 14 speech clips: `benchmarks/sweeps/model_aware.py`.
+

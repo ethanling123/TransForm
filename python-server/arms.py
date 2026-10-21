@@ -98,6 +98,59 @@ def encode_arrow_ipc(table: pa.Table, codec: str) -> bytes:
     return buf.getvalue().to_pybytes()
 
 
+# Model-aware arms. Both are opt-in (selectable=False) and lossy for the original file: they hand a model the input it
+# will in any case be given. Claude counts ceil(w / 28) * ceil(h / 28) visual tokens and downsizes above a long edge and
+# token limit (1568 and 1568 for the standard tier), so pixels beyond that never reach the model; the resampler here
+# is not the provider's, so equivalence is approximate. Speech models take 16 kHz mono audio.
+VISION_MAX_EDGE = 1568
+VISION_MAX_TOKENS = 1568
+
+
+def fit_image_to_model(data: bytes, max_edge: int = VISION_MAX_EDGE, max_tokens: int = VISION_MAX_TOKENS) -> bytes:
+    """PNG bytes of the image scaled down to the model's limits; the original bytes if it already fits or if scaling
+    would not make the file smaller."""
+    from PIL import Image
+
+    im = Image.open(BytesIO(data))
+    w, h = im.size
+
+    def tokens(a: float, b: float) -> int:
+        return -(-int(a) // 28) * -(-int(b) // 28)
+
+    scale = min(1.0, max_edge / max(w, h))
+    while tokens(w * scale, h * scale) > max_tokens:
+        scale *= 0.98
+    if scale >= 1.0:
+        return data
+    im = im.convert("RGBA" if im.mode in ("RGBA", "LA", "P") else "RGB")
+    out = BytesIO()
+    im.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS).save(out, "PNG")
+    # Flat graphics can compress better at full size than after resampling; the provider downscales either way.
+    return out.getvalue() if out.tell() < len(data) else data
+
+
+def audio_to_16k_mono(data: bytes) -> bytes:
+    """16-bit 16 kHz mono WAV from any audio ffmpeg can read."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg is needed for the audio_16k_blob arm")
+    # Files, not pipes: a WAV written to a pipe cannot be seeked, so its header sizes would be wrong.
+    with tempfile.TemporaryDirectory() as tmp:
+        src, dst = f"{tmp}/in", f"{tmp}/out.wav"
+        with open(src, "wb") as f:
+            f.write(data)
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-ac", "1", "-ar", "16000",
+                        "-c:a", "pcm_s16le", dst], check=True, capture_output=True)
+        with open(dst, "rb") as f:
+            return f.read()
+
+
+MEDIA_TRANSFORMS = {"image_fit_blob": (fit_image_to_model, "image/png"), "audio_16k_blob": (audio_to_16k_mono, "audio/wav")}
+
+
 def encode_raw(data: bytes, codec: str, level: Optional[int]) -> bytes:
     return pa.Codec(codec, compression_level=level).compress(data, asbytes=True)
 
@@ -124,5 +177,7 @@ for _spec in (
     ArmSpec("parquet_zstd9_blob", "table", "parquet", "blob", codec="zstd", level=9, selectable=False),
     ArmSpec("arrow_ipc_lz4_blob", "table", "arrow_ipc", "blob", codec="lz4", selectable=False),
     ArmSpec("arrow_ipc_zstd_blob", "table", "arrow_ipc", "blob", codec="zstd", selectable=False),
+    ArmSpec("image_fit_blob", "unstructured", "raw", "blob", codec="png-fit-to-model", lossless=False, selectable=False),
+    ArmSpec("audio_16k_blob", "unstructured", "raw", "blob", codec="wav-16k-mono", lossless=False, selectable=False),
 ):
     REGISTRY.register(_spec)

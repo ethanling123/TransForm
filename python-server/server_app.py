@@ -2028,9 +2028,13 @@ def large_result_auto(
     optimization_target: Optional[str] = None,
     prefer_streaming: bool = False,
     use_mab: bool = False,
+    consumer: Optional[str] = None,
 ) -> CallToolResult:
     """
     One-shot server-side format selection: choose the best representation and return it.
+
+    `consumer` (Python server only) says what will read an image or audio payload: "vision" gets the image scaled to a
+    vision model's input limits, "asr" gets 16 kHz mono audio. Both are lossy for the original file; omit it to keep it.
 
     This is the "one MCP round trip" path: the client sends (result_id or shape) and
     optimization_target; the server returns payload + chosen_format + decode hints.
@@ -2041,6 +2045,22 @@ def large_result_auto(
         if cfg is not None and cfg.payload_kind == "unstructured":
             if cfg.raw_path is None or not cfg.raw_path.is_file():
                 raise ValueError(f"Unstructured result_id missing file: {result_id}")
+            if consumer:
+                wanted = {"vision": ("image_fit_blob", "image/"), "asr": ("audio_16k_blob", "audio/")}.get(consumer.strip().lower())
+                if wanted is None:
+                    raise ValueError(f"Unknown consumer {consumer!r}; use 'vision' or 'asr'")
+                if (cfg.raw_mime_type or "").startswith(wanted[1]):
+                    desc = fetch_arm(wanted[0], result_id).structured_content or {}
+                    return CallToolResult(
+                        content=[TextContent(type="text", text=f"Returning {wanted[0]} descriptor (lossy, for {consumer}): {desc.get('url')}")],
+                        structured_content={
+                            "payload_kind": "unstructured",
+                            "chosen_format": wanted[0],
+                            "payload": {"kind": "descriptor", **desc},
+                            "decode": {"encoding": "raw_bytes", "transport": "http_blob", "url": desc.get("url"),
+                                       "mime_type": desc.get("mime_type"), "lossless": False, "consumer": consumer},
+                        },
+                    )
             if optimization_target:
                 try:
                     sel_target = OptimizationTarget(optimization_target.strip().lower())
@@ -3180,6 +3200,14 @@ def _serve_table_codec_arm(cfg: ResultConfig, spec: "arms.ArmSpec") -> Response:
     )
 
 
+def _serve_media_arm(cfg: ResultConfig, spec: "arms.ArmSpec") -> Response:
+    transform, mime = arms.MEDIA_TRANSFORMS[spec.name]
+    original = cfg.raw_path.read_bytes()
+    data = transform(original)
+    return Response(content=data, media_type=mime,
+                    headers={"X-Benchmark-Bytes": str(len(data)), "X-Original-Bytes": str(len(original))})
+
+
 async def data_endpoint(request) -> Response:
     """One route for every minted handle: dispatch on the arm it was minted for."""
     handle: str = request.path_params["handle"]
@@ -3195,7 +3223,12 @@ async def data_endpoint(request) -> Response:
     spec = REGISTRY.get(cfg.arm)
     request.scope["path_params"] = {"result_id": handle}
     legacy = _LEGACY_ENDPOINTS.get(spec.name)
-    response = await legacy(request) if legacy else _serve_table_codec_arm(cfg, spec)
+    if legacy:
+        response = await legacy(request)
+    elif spec.name in arms.MEDIA_TRANSFORMS:
+        response = _serve_media_arm(cfg, spec)
+    else:
+        response = _serve_table_codec_arm(cfg, spec)
     if isinstance(response, StreamingResponse):
         return response
     response.headers["X-Payload-Codec"] = response.headers.get("X-Payload-Codec") or str(_arm_codec(spec, cfg))
@@ -3270,9 +3303,16 @@ def fetch_arm(arm: str, result_id: str) -> CallToolResult:
             raw_codec_paths=src.raw_codec_paths,
             arm=arm,
         )
-        route = {"raw_blob": "raw", "gzip_blob": "raw-gzip", "zstd_blob": "raw-zstd", "brotli_blob": "raw-brotli"}[arm]
-        descriptor = {"mode": arm, "id": new_id, "url": f"http://localhost:8000/{route}/{new_id}",
-                      "mime_type": src.raw_mime_type or "application/octet-stream"}
+        if arm in arms.MEDIA_TRANSFORMS:
+            wanted = "image/" if arm == "image_fit_blob" else "audio/"
+            if not (src.raw_mime_type or "").startswith(wanted):
+                raise ValueError(f"{arm} needs a {wanted}* payload; {result_id} is {src.raw_mime_type}")
+            descriptor = {"mode": arm, "id": new_id, "url": f"http://localhost:8000/data/{new_id}",
+                          "mime_type": arms.MEDIA_TRANSFORMS[arm][1], "lossless": False}
+        else:
+            route = {"raw_blob": "raw", "gzip_blob": "raw-gzip", "zstd_blob": "raw-zstd", "brotli_blob": "raw-brotli"}[arm]
+            descriptor = {"mode": arm, "id": new_id, "url": f"http://localhost:8000/{route}/{new_id}",
+                          "mime_type": src.raw_mime_type or "application/octet-stream"}
     _add_arm_fields(descriptor, arm)
     return CallToolResult(
         content=[TextContent(type="text", text=f"{arm} descriptor: {descriptor['data_url']}")],
