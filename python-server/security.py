@@ -71,3 +71,55 @@ class OwnedRegistry(dict):
             cfg.owner = current_principal.get()
         dict.__setitem__(self, key, cfg)
 
+
+# ----- Step 2: signed, expiring, principal-bound fetch links ---------------------------
+
+import base64
+import functools
+import hashlib
+import secrets
+import time
+from urllib.parse import parse_qs
+
+DATA_PREFIXES = ("/blobs/", "/streams/", "/ipc-blobs/", "/ipc-streams/", "/data/", "/raw/", "/raw-gzip/", "/raw-zstd/", "/raw-brotli/")
+
+
+@functools.lru_cache(maxsize=1)
+def _secret() -> bytes:
+    configured = os.environ.get("TRANSFORM_URL_SECRET", "")
+    return configured.encode() if configured else secrets.token_bytes(32)
+
+
+def ttl_seconds() -> int:
+    return int(os.environ.get("TRANSFORM_URL_TTL_S", "300"))
+
+
+def _tag(path: str, principal: str, exp: int) -> str:
+    mac = hmac.new(_secret(), f"{path}\n{principal}\n{exp}".encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac[:16]).decode().rstrip("=")
+
+
+def signed(path: str) -> str:
+    """The path with `exp` and `sig` for the current principal; unchanged when the flag is off. The host is not signed."""
+    if not enabled():
+        return path
+    exp = int(time.time()) + ttl_seconds()
+    return f"{path}?exp={exp}&sig={_tag(path, current_principal.get(), exp)}"
+
+
+def is_data_path(path: str) -> bool:
+    return path.startswith(DATA_PREFIXES)
+
+
+def verify(path: str, query_string: bytes, principal: str) -> Optional[str]:
+    """None when the link is valid for this principal, otherwise the reason it is not."""
+    query = parse_qs(query_string.decode("latin-1"))
+    try:
+        exp, sig = int(query["exp"][0]), query["sig"][0]
+    except (KeyError, ValueError):
+        return "missing signature"
+    if not hmac.compare_digest(sig, _tag(path, principal, exp)):
+        return "bad signature"
+    if exp < time.time():
+        return "expired"
+    return None

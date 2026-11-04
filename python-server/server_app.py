@@ -1541,7 +1541,7 @@ def large_parquet_blob(
     descriptor = {
         "mode": "parquet_blob",
         "id": new_id,
-        "url": f"http://localhost:8000/blobs/{new_id}.parquet",
+        "url": _url(f"/blobs/{new_id}.parquet"),
         "n_rows": n_rows,
         "n_cols": n_cols,
         "compression": comp,
@@ -1608,7 +1608,7 @@ def large_parquet_stream(
     descriptor = {
         "mode": "parquet_stream",
         "id": new_id,
-        "url": f"http://localhost:8000/streams/{new_id}",
+        "url": _url(f"/streams/{new_id}"),
         "n_rows": n_rows,
         "n_cols": n_cols,
         "rows_per_chunk": rows_per_chunk,
@@ -1673,7 +1673,7 @@ def large_arrow_ipc_blob(
     descriptor = {
         "mode": "arrow_ipc_blob",
         "id": new_id,
-        "url": f"http://localhost:8000/ipc-blobs/{new_id}.arrow",
+        "url": _url(f"/ipc-blobs/{new_id}.arrow"),
         "n_rows": n_rows,
         "n_cols": n_cols,
         "ipc_compression": ipc_comp,
@@ -1739,7 +1739,7 @@ def large_arrow_ipc_stream(
     descriptor = {
         "mode": "arrow_ipc_stream",
         "id": new_id,
-        "url": f"http://localhost:8000/ipc-streams/{new_id}",
+        "url": _url(f"/ipc-streams/{new_id}"),
         "n_rows": n_rows,
         "n_cols": n_cols,
         "rows_per_chunk": rows_per_chunk,
@@ -2119,7 +2119,7 @@ def large_result_auto(
                     raw_codec_paths=cfg.raw_codec_paths,
                     arm=chosen,
                 )
-                url = f"http://localhost:8000/{route}/{new_id}"
+                url = _url(f"/{route}/{new_id}")
                 mime = cfg.raw_mime_type or "application/octet-stream"
                 structured = {
                     "payload_kind": "unstructured",
@@ -2158,7 +2158,7 @@ def large_result_auto(
                 descriptor = {
                     "mode": "gzip_blob",
                     "id": new_id,
-                    "url": f"http://localhost:8000/raw-gzip/{new_id}",
+                    "url": _url(f"/raw-gzip/{new_id}"),
                     "mime_type": cfg.raw_mime_type or "application/octet-stream",
                 }
                 structured = {
@@ -2197,7 +2197,7 @@ def large_result_auto(
             descriptor = {
                 "mode": "raw_blob",
                 "id": new_id,
-                "url": f"http://localhost:8000/raw/{new_id}",
+                "url": _url(f"/raw/{new_id}"),
                 "mime_type": cfg.raw_mime_type or "application/octet-stream",
             }
             structured = {
@@ -3202,7 +3202,7 @@ def _add_arm_fields(descriptor: Dict[str, Any], arm: str) -> Dict[str, Any]:
     descriptor.setdefault("modality", spec.modality)
     descriptor.setdefault("mime_type", spec.mime_type)
     descriptor["codec"] = _arm_codec(spec, cfg)
-    descriptor["data_url"] = f"http://localhost:8000/data/{descriptor['id']}"
+    descriptor["data_url"] = _url(f"/data/{descriptor['id']}")
     cached = _cached_blob(spec, cfg)
     if cached is not None:
         descriptor["size"] = len(cached)
@@ -3313,7 +3313,7 @@ def fetch_arm(arm: str, result_id: str) -> CallToolResult:
             arm=arm,
         )
         _inherit_caches(new_id, result_id)
-        url = f"http://localhost:8000/data/{new_id}"
+        url = _url(f"/data/{new_id}")
         descriptor: Dict[str, Any] = {"mode": arm, "id": new_id, "url": url, "n_rows": src.n_rows, "n_cols": src.n_cols}
     else:
         RESULT_REGISTRY[new_id] = ResultConfig(
@@ -3331,11 +3331,11 @@ def fetch_arm(arm: str, result_id: str) -> CallToolResult:
             wanted = "image/" if arm == "image_fit_blob" else "audio/"
             if not (src.raw_mime_type or "").startswith(wanted):
                 raise ValueError(f"{arm} needs a {wanted}* payload; {result_id} is {src.raw_mime_type}")
-            descriptor = {"mode": arm, "id": new_id, "url": f"http://localhost:8000/data/{new_id}",
+            descriptor = {"mode": arm, "id": new_id, "url": _url(f"/data/{new_id}"),
                           "mime_type": arms.MEDIA_TRANSFORMS[arm][1], "lossless": False}
         else:
             route = {"raw_blob": "raw", "gzip_blob": "raw-gzip", "zstd_blob": "raw-zstd", "brotli_blob": "raw-brotli"}[arm]
-            descriptor = {"mode": arm, "id": new_id, "url": f"http://localhost:8000/{route}/{new_id}",
+            descriptor = {"mode": arm, "id": new_id, "url": _url(f"/{route}/{new_id}"),
                           "mime_type": src.raw_mime_type or "application/octet-stream"}
     _add_arm_fields(descriptor, arm)
     return CallToolResult(
@@ -3486,6 +3486,10 @@ async def register_materialized_raw_endpoint(request) -> Response:
 # When unset, no authentication is required (backward compatible).
 
 
+def _url(path: str) -> str:
+    return "http://localhost:8000" + security.signed(path)
+
+
 class BearerAuthMiddleware:
     """
     Validate Bearer token against MCP_API_KEY env var.
@@ -3538,11 +3542,21 @@ class BearerAuthMiddleware:
             if principal is None:
                 await self._send_401(send, "Invalid API key")
                 return
+        if security.is_data_path(scope["path"]):
+            problem = security.verify(scope["path"], scope.get("query_string", b""), principal)
+            if problem:
+                await self._send_403(send, problem)
+                return
         reset = security.current_principal.set(principal)
         try:
             await self.app(scope, receive, send)
         finally:
             security.current_principal.reset(reset)
+
+    async def _send_403(self, send: Send, detail: str) -> None:
+        body = json.dumps({"error": "forbidden", "detail": f"link rejected: {detail}"}).encode("utf-8")
+        await send({"type": "http.response.start", "status": 403, "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": body})
 
     async def _send_401(self, send: Send, detail: str) -> None:
         body = json.dumps({"error": "unauthorized", "detail": detail}).encode("utf-8")

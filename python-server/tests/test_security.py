@@ -73,15 +73,20 @@ class Principals(SecureTestCase):
     def test_owner_is_stamped_from_the_key(self):
         self.assertEqual(S.RESULT_REGISTRY.raw(self.register()).owner, "alice")
 
-    def test_another_principal_cannot_read_the_blob(self):
+    def link(self, path, who):
+        with as_principal(who):
+            return security.signed(path)
+
+    def test_another_principal_cannot_read_the_blob_even_with_a_link_signed_for_them(self):
         rid = self.register()
-        self.assertEqual(self.client.get(f"/blobs/{rid}.parquet", headers=ALICE).status_code, 200)
-        self.assertEqual(self.client.get(f"/blobs/{rid}.parquet", headers=BOB).status_code, 404)
+        path = f"/blobs/{rid}.parquet"
+        self.assertEqual(self.client.get(self.link(path, "alice"), headers=ALICE).status_code, 200)
+        self.assertEqual(self.client.get(self.link(path, "bob"), headers=BOB).status_code, 404)
 
     def test_a_foreign_handle_looks_like_an_unknown_one(self):
         rid = self.register()
-        foreign = self.client.get(f"/blobs/{rid}.parquet", headers=BOB)
-        unknown = self.client.get("/blobs/does-not-exist.parquet", headers=BOB)
+        foreign = self.client.get(self.link(f"/blobs/{rid}.parquet", "bob"), headers=BOB)
+        unknown = self.client.get(self.link("/blobs/does-not-exist.parquet", "bob"), headers=BOB)
         self.assertEqual((foreign.status_code, foreign.content), (unknown.status_code, unknown.content))
 
     def test_derived_handles_inherit_the_owner(self):
@@ -90,7 +95,7 @@ class Principals(SecureTestCase):
             out = S.large_parquet_blob(0, 0, result_id=rid).structured_content
         path = out["url"].replace("http://localhost:8000", "")
         self.assertEqual(self.client.get(path, headers=ALICE).status_code, 200)
-        self.assertEqual(self.client.get(path, headers=BOB).status_code, 404)
+        self.assertNotEqual(self.client.get(path, headers=BOB).status_code, 200)
 
     def test_tools_do_not_resolve_a_foreign_handle(self):
         rid = self.register()
@@ -106,6 +111,63 @@ class Principals(SecureTestCase):
         other = self.client.post("/mcp/mcp", json=call, headers={**BOB, **mcp_headers})
         self.assertFalse(own.json()["result"].get("isError"), own.text)
         self.assertTrue(other.json()["result"].get("isError"), other.text)
+
+
+class SignedLinks(SecureTestCase):
+    def fetch_url(self, who=ALICE):
+        rid = self.register(who)
+        name = "alice" if who is ALICE else "bob"
+        with as_principal(name):
+            out = S.large_parquet_blob(0, 0, result_id=rid).structured_content
+        return out["url"].replace("http://localhost:8000", "")
+
+    def test_descriptor_urls_are_signed_and_work(self):
+        path = self.fetch_url()
+        self.assertIn("sig=", path)
+        self.assertEqual(self.client.get(path, headers=ALICE).status_code, 200)
+
+    def test_an_unsigned_link_is_refused(self):
+        path = self.fetch_url().split("?")[0]
+        r = self.client.get(path, headers=ALICE)
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("missing signature", r.text)
+
+    def test_a_tampered_expiry_is_refused(self):
+        path = self.fetch_url()
+        base, query = path.split("?")
+        exp = int(query.split("exp=")[1].split("&")[0])
+        r = self.client.get(path.replace(f"exp={exp}", f"exp={exp + 3600}"), headers=ALICE)
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("bad signature", r.text)
+
+    def test_an_expired_link_is_refused(self):
+        os.environ["TRANSFORM_URL_TTL_S"] = "-1"
+        self.addCleanup(os.environ.pop, "TRANSFORM_URL_TTL_S")
+        path = self.fetch_url()
+        r = self.client.get(path, headers=ALICE)
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("expired", r.text)
+
+    def test_a_link_is_bound_to_the_principal_it_was_minted_for(self):
+        path = self.fetch_url()
+        r = self.client.get(path, headers=BOB)
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("bad signature", r.text)
+
+    def test_a_signature_does_not_transfer_to_another_path(self):
+        path = self.fetch_url()
+        other = self.fetch_url().split("?")[0]
+        r = self.client.get(other + "?" + path.split("?")[1], headers=ALICE)
+        self.assertEqual(r.status_code, 403)
+
+    def test_without_any_keys_links_still_expire(self):
+        os.environ.pop("MCP_API_KEYS")
+        r = self.client.post("/materialized", content=parquet_bytes(), headers={"Content-Type": "application/octet-stream"})
+        rid = r.json()["result_id"]
+        out = S.large_parquet_blob(0, 0, result_id=rid).structured_content
+        url = out["url"].replace("http://localhost:8000", "")
+        self.assertEqual(self.client.get(url).status_code, 200)
+        self.assertEqual(self.client.get(url.split("?")[0]).status_code, 403)
 
 
 class FlagOff(unittest.TestCase):

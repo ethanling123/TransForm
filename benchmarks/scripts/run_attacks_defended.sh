@@ -7,7 +7,7 @@ mkdir -p results/attacks
 export PYTHONPATH=$PWD
 
 stop_servers
-start_python_server attacks_defended TRANSFORM_SECURE=1 MCP_API_KEYS=alice:sk-alice-test-key,bob:sk-bob-test-key
+start_python_server attacks_defended TRANSFORM_SECURE=1 TRANSFORM_URL_TTL_S=3 MCP_API_KEYS=alice:sk-alice-test-key,bob:sk-bob-test-key
 $PY -m benchmarks.attacks.run_attacks --label defended --api-key sk-alice-test-key --second-key sk-bob-test-key \
   --out results/attacks/${TAG}.json
 clean_scratch
