@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import hashlib
 import io
 import os
 import sys
@@ -14,13 +17,19 @@ os.environ.setdefault("TRANSFORM_SCRATCH_DIR", _SCRATCH)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.chdir(_SCRATCH)
 
+import httpx  # noqa: E402
+from cryptography.hazmat.primitives import serialization  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: E402
 import pandas as pd  # noqa: E402
 import pyarrow as pa  # noqa: E402
 import pyarrow.parquet as pq  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
 import security  # noqa: E402
 import server_app as S  # noqa: E402
 import shared  # noqa: E402
+from client import verify  # noqa: E402
 
 KEYS = "alice:key-alice,bob:key-bob"
 ALICE = {"Authorization": "Bearer key-alice"}
@@ -168,6 +177,124 @@ class SignedLinks(SecureTestCase):
         url = out["url"].replace("http://localhost:8000", "")
         self.assertEqual(self.client.get(url).status_code, 200)
         self.assertEqual(self.client.get(url.split("?")[0]).status_code, 403)
+
+
+TEXT = b"".join(b'{"id":%d,"tags":["a","b"]}\n' % i for i in range(5000))
+
+
+class Tamper(httpx.AsyncBaseTransport):
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def handle_async_request(self, request):
+        resp = await self.inner.handle_async_request(request)
+        body = bytearray(b"".join([c async for c in resp.aiter_raw()]))
+        body[len(body) // 2] ^= 0xFF
+        headers = [(k, v) for k, v in resp.headers.items() if k.lower() not in ("content-length", "content-encoding")]
+        return httpx.Response(resp.status_code, headers=headers, content=bytes(body))
+
+
+class SignedDescriptors(SecureTestCase):
+    def setUp(self):
+        super().setUp()
+        self.key = security.public_key_b64()
+
+    def raw_id(self):
+        r = self.client.post("/materialized-raw", content=TEXT, headers={**ALICE, "Content-Type": "text/plain"})
+        return r.json()["result_id"]
+
+    def mint(self, arm, rid):
+        with as_principal("alice"):
+            return S.fetch_arm(arm, rid).structured_content
+
+    def fetch(self, out, source, transport=None):
+        async def go():
+            kwargs = {"transport": transport} if transport else {"transport": httpx.ASGITransport(app=S.app)}
+            async with httpx.AsyncClient(base_url="http://localhost:8000", headers=ALICE, **kwargs) as c:
+                return await verify.fetch_verified(c, out, expected_source=source, public_key=self.key)
+        return asyncio.run(go())
+
+    def test_raw_byte_arms_verify_against_the_original_bytes(self):
+        rid = self.raw_id()
+        for arm in ("raw_blob", "gzip_blob", "zstd_blob", "brotli_blob"):
+            with self.subTest(arm=arm):
+                self.assertEqual(self.fetch(self.mint(arm, rid), rid), TEXT)
+
+    def test_table_arms_verify_against_the_response_body(self):
+        rid = self.register()
+        for arm in ("parquet_blob", "arrow_ipc_blob", "parquet_zstd3_blob", "arrow_ipc_lz4_blob"):
+            with self.subTest(arm=arm):
+                out = self.mint(arm, rid)
+                grant = out["grant"]
+                body = self.fetch(out, rid)
+                self.assertEqual(hashlib.sha256(body).hexdigest(), grant["digest"])
+
+    def test_the_digest_computed_at_mint_matches_what_the_route_serves_later(self):
+        rid = self.register()
+        out = self.mint("parquet_zstd9_blob", rid)
+        served = self.client.get(out["url"].replace("http://localhost:8000", ""), headers=ALICE).content
+        self.assertEqual(hashlib.sha256(served).hexdigest(), out["grant"]["digest"])
+
+    def test_a_forged_url_is_refused(self):
+        rid, other = self.register(), self.register()
+        mine, theirs = self.mint("parquet_blob", rid), self.mint("parquet_blob", other)
+        forged = {**mine, "url": theirs["url"]}
+        with self.assertRaisesRegex(verify.IntegrityError, "not the path the grant covers"):
+            self.fetch(forged, rid)
+
+    def test_another_results_genuine_descriptor_is_refused(self):
+        rid, other = self.register(), self.register()
+        with self.assertRaisesRegex(verify.IntegrityError, "not the .* that was asked for"):
+            self.fetch(self.mint("parquet_blob", other), rid)
+
+    def test_an_edited_grant_is_refused(self):
+        rid = self.register()
+        out = self.mint("parquet_blob", rid)
+        out["grant"] = {**out["grant"], "digest": "0" * 64}
+        with self.assertRaisesRegex(verify.IntegrityError, "signature does not verify"):
+            self.fetch(out, rid)
+
+    def test_a_descriptor_without_a_grant_is_refused(self):
+        rid = self.register()
+        out = self.mint("parquet_blob", rid)
+        out.pop("grant")
+        with self.assertRaisesRegex(verify.IntegrityError, "no signed grant"):
+            self.fetch(out, rid)
+
+    def test_a_key_other_than_the_pinned_one_is_refused(self):
+        rid = self.register()
+        out = self.mint("parquet_blob", rid)
+        other = Ed25519PrivateKey.generate().public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        self.key = base64.b64encode(other).decode()
+        with self.assertRaisesRegex(verify.IntegrityError, "signature does not verify"):
+            self.fetch(out, rid)
+
+    def test_bytes_changed_in_flight_are_refused(self):
+        rid = self.register()
+        out = self.mint("parquet_blob", rid)
+        with self.assertRaisesRegex(verify.IntegrityError, "do not match the signed digest"):
+            self.fetch(out, rid, transport=Tamper(httpx.ASGITransport(app=S.app)))
+
+    def test_bytes_changed_in_flight_are_refused_for_a_compressed_raw_arm(self):
+        rid = self.raw_id()
+        out = self.mint("zstd_blob", rid)
+        with self.assertRaises(verify.IntegrityError):
+            self.fetch(out, rid, transport=Tamper(httpx.ASGITransport(app=S.app)))
+
+    def test_streams_carry_no_digest_and_are_refused(self):
+        rid = self.register()
+        with as_principal("alice"):
+            out = S.large_parquet_stream(0, 0, 100, result_id=rid).structured_content
+        self.assertIsNone(out["grant"]["digest"])
+        with self.assertRaisesRegex(verify.IntegrityError, "streams are not covered"):
+            self.fetch(out, rid)
+
+    def test_large_result_auto_descriptors_carry_a_grant_for_the_requested_result(self):
+        rid = self.raw_id()
+        with as_principal("alice"):
+            out = S.large_result_auto(0, 0, result_id=rid, optimization_target="min_bytes").structured_content
+        self.assertEqual(out["payload"]["grant"]["source"], rid)
+        self.assertEqual(self.fetch(out, rid), TEXT)
 
 
 class FlagOff(unittest.TestCase):

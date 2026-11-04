@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import urlsplit
 
 import numpy as np
 import pandas as pd
@@ -1547,7 +1548,7 @@ def large_parquet_blob(
         "compression": comp,
         "encoding_strategy": enc_strat,
     }
-    _add_arm_fields(descriptor, "parquet_blob")
+    _add_arm_fields(descriptor, "parquet_blob", source=result_id)
 
     return CallToolResult(
         content=[
@@ -1615,7 +1616,7 @@ def large_parquet_stream(
         "compression": comp,
         "encoding_strategy": enc_strat,
     }
-    _add_arm_fields(descriptor, "parquet_stream")
+    _add_arm_fields(descriptor, "parquet_stream", source=result_id)
 
     return CallToolResult(
         content=[
@@ -1678,7 +1679,7 @@ def large_arrow_ipc_blob(
         "n_cols": n_cols,
         "ipc_compression": ipc_comp,
     }
-    _add_arm_fields(descriptor, "arrow_ipc_blob")
+    _add_arm_fields(descriptor, "arrow_ipc_blob", source=result_id)
 
     return CallToolResult(
         content=[
@@ -1745,7 +1746,7 @@ def large_arrow_ipc_stream(
         "rows_per_chunk": rows_per_chunk,
         "ipc_compression": ipc_comp,
     }
-    _add_arm_fields(descriptor, "arrow_ipc_stream")
+    _add_arm_fields(descriptor, "arrow_ipc_stream", source=result_id)
 
     return CallToolResult(
         content=[
@@ -2125,7 +2126,7 @@ def large_result_auto(
                     "payload_kind": "unstructured",
                     "chosen_format": chosen,
                     "optimization_target": sel_target.value,
-                    "payload": _add_arm_fields({"kind": "descriptor", "mode": chosen, "id": new_id, "url": url, "mime_type": mime}, chosen),
+                    "payload": _add_arm_fields({"kind": "descriptor", "mode": chosen, "id": new_id, "url": url, "mime_type": mime}, chosen, source=result_id),
                     "decode": {
                         "encoding": "raw_bytes",
                         "transport": "http_blob",
@@ -2165,7 +2166,7 @@ def large_result_auto(
                     "payload_kind": "unstructured",
                     "chosen_format": "gzip_blob",
                     "optimization_target": sel_target.value,
-                    "payload": _add_arm_fields({"kind": "descriptor", **descriptor}, "gzip_blob"),
+                    "payload": _add_arm_fields({"kind": "descriptor", **descriptor}, "gzip_blob", source=result_id),
                     "decode": {
                         "encoding": "raw_bytes",
                         "transport": "http_blob",
@@ -2204,7 +2205,7 @@ def large_result_auto(
                 "payload_kind": "unstructured",
                 "chosen_format": "raw_blob",
                 "optimization_target": sel_target.value,
-                "payload": _add_arm_fields({"kind": "descriptor", **descriptor}, "raw_blob"),
+                "payload": _add_arm_fields({"kind": "descriptor", **descriptor}, "raw_blob", source=result_id),
                 "decode": {
                     "encoding": "raw_bytes",
                     "transport": "http_blob",
@@ -3191,7 +3192,7 @@ def _cached_blob(spec: "arms.ArmSpec", cfg: ResultConfig) -> Optional[bytes]:
     return None
 
 
-def _add_arm_fields(descriptor: Dict[str, Any], arm: str) -> Dict[str, Any]:
+def _add_arm_fields(descriptor: Dict[str, Any], arm: str, source: Optional[str] = None) -> Dict[str, Any]:
     """Add the registry fields to a descriptor in place; existing fields are left alone.
 
     size and digest are included only when the encoded bytes are already in memory, so a tool call never encodes.
@@ -3207,7 +3208,50 @@ def _add_arm_fields(descriptor: Dict[str, Any], arm: str) -> Dict[str, Any]:
     if cached is not None:
         descriptor["size"] = len(cached)
         descriptor["digest"] = hashlib.sha256(cached).hexdigest()
+    if security.enabled():
+        descriptor["grant"] = _grant(descriptor, spec, cfg, source or descriptor["id"])
     return descriptor
+
+
+_RAW_DIGESTS: Dict[Path, str] = {}
+_WIRE_DIGESTS: Dict[str, str] = {}
+
+
+def _integrity(handle: str, spec: "arms.ArmSpec", cfg: ResultConfig) -> Tuple[Optional[str], Optional[str]]:
+    """(digest, scope) the client can check, or (None, None) for an arm with no single body to hash (streams).
+
+    Raw byte arms share one digest of the original bytes, hashed once per file, so no codec has to run at mint time; the client
+    checks it after decompressing. Every other blob arm is hashed over the response body, which may need the payload encoded
+    now if registration has not already done it.
+    """
+    if spec.transport != "blob":
+        return None, None
+    if spec.container == "raw" and spec.name not in arms.MEDIA_TRANSFORMS:
+        digest = _RAW_DIGESTS.get(cfg.raw_path)
+        if digest is None:
+            digest = _RAW_DIGESTS[cfg.raw_path] = hashlib.sha256(cfg.raw_path.read_bytes()).hexdigest()
+        return digest, "raw"
+    digest = _WIRE_DIGESTS.get(handle)
+    if digest is None:
+        if spec.name in arms.MEDIA_TRANSFORMS:
+            body = _serve_media_arm(cfg, spec).body
+        elif spec.name == "parquet_blob":
+            body = _parquet_blob_data(cfg, handle)
+        elif spec.name == "arrow_ipc_blob":
+            body = _ipc_blob_data(cfg, handle)
+        else:
+            body = _serve_table_codec_arm(cfg, spec).body
+        digest = _WIRE_DIGESTS[handle] = hashlib.sha256(body).hexdigest()
+    return digest, "wire"
+
+
+def _grant(descriptor: Dict[str, Any], spec: "arms.ArmSpec", cfg: ResultConfig, source: str) -> Dict[str, Any]:
+    digest, scope = _integrity(descriptor["id"], spec, cfg)
+    return security.sign_grant({
+        "v": 1, "source": source, "id": descriptor["id"], "arm": spec.name,
+        "path": urlsplit(descriptor["url"]).path, "digest": digest, "digest_of": scope,
+        "principal": security.current_principal.get(), "exp": int(time.time()) + security.ttl_seconds(),
+    })
 
 
 def _serve_table_codec_arm(cfg: ResultConfig, spec: "arms.ArmSpec") -> Response:
@@ -3283,6 +3327,12 @@ def list_arms() -> CallToolResult:
 
 
 @mcp.tool()
+def signing_public_key() -> Dict[str, Any]:
+    """The Ed25519 public key (base64) that signs descriptor grants when TRANSFORM_SECURE=1; a client pins it to verify them."""
+    return {"secure": security.enabled(), "public_key": security.public_key_b64() if security.enabled() else None}
+
+
+@mcp.tool()
 def fetch_arm(arm: str, result_id: str) -> CallToolResult:
     """Return a descriptor for *result_id* delivered through a specific blob arm, selectable or not."""
     try:
@@ -3337,7 +3387,7 @@ def fetch_arm(arm: str, result_id: str) -> CallToolResult:
             route = {"raw_blob": "raw", "gzip_blob": "raw-gzip", "zstd_blob": "raw-zstd", "brotli_blob": "raw-brotli"}[arm]
             descriptor = {"mode": arm, "id": new_id, "url": _url(f"/{route}/{new_id}"),
                           "mime_type": src.raw_mime_type or "application/octet-stream"}
-    _add_arm_fields(descriptor, arm)
+    _add_arm_fields(descriptor, arm, source=result_id)
     return CallToolResult(
         content=[TextContent(type="text", text=f"{arm} descriptor: {descriptor['data_url']}")],
         structured_content=descriptor,

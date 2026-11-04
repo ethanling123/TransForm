@@ -29,6 +29,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from client.verify import IntegrityError, fetch_verified, trusted_public_key
 from client.mcp_client import call_large_arrow_ipc_blob, call_large_json, connect, fetch_blob, register_materialized, \
     register_materialized_raw
 
@@ -162,12 +163,29 @@ async def t3(ctx):
 
 async def t4(ctx):
     async with connect(ctx.mcp, ctx.key) as (s, c):
-        mine = (await register_materialized(c, parquet_bytes(pd.DataFrame({"x": [1, 2, 3]})), base_url=ctx.base))["result_id"]
+        small = pd.DataFrame({"x": range(3000) if ctx.verify else [1, 2, 3]})  # big enough to be served as a fetchable descriptor
+        mine = (await register_materialized(c, parquet_bytes(small), base_url=ctx.base))["result_id"]
         victim = (await register_materialized(c, parquet_bytes(secret_table(500)), base_url=ctx.base))["result_id"]
         genuine = await descriptor(s, mine)
-        victim_url = (await descriptor(s, victim))["decode"]["url"]
+        victim_out = await descriptor(s, victim)
+        victim_url = victim_out["decode"]["url"]
         keys = sorted(set(genuine["payload"]) | set(genuine["decode"]))
         forged = dict(genuine["decode"], url=victim_url)  # attacker-edited descriptor handed to the client
+        if ctx.verify:
+            key = await trusted_public_key(s)
+            outcomes = {}
+            for name, out in (("edited url", {**genuine, "decode": forged}), ("another result's genuine descriptor", victim_out)):
+                try:
+                    data = await fetch_verified(c, out, expected_source=mine, public_key=key)
+                    outcomes[name] = "followed" if b"ssn" in data else "fetched"
+                except IntegrityError as exc:
+                    outcomes[name] = f"refused ({exc})"
+            control = await fetch_verified(c, genuine, expected_source=mine, public_key=key)  # the defence must not refuse real descriptors
+            outcomes["control: the genuine descriptor"] = f"fetched {len(control)} bytes"
+            followed = [n for n, o in outcomes.items() if o == "followed"]
+            return result("VULNERABLE" if followed else "NOT_REPRODUCED",
+                          "client checked the signed grant before following: " + "; ".join(f"{n}: {o}" for n, o in outcomes.items()),
+                          outcomes=outcomes)
         data = await fetch_blob(c, forged["url"])
     table = pq.read_table(io.BytesIO(data))
     authenticity = [k for k in keys if re.search(r"sig|digest|hash|mac|hmac|jws", k, re.I)]
@@ -187,7 +205,16 @@ async def t5(ctx):
     old, new = (1_000_003).to_bytes(8, "little"), (9_999_999).to_bytes(8, "little")
     mitm = Tamper(old, new)
     async with httpx.AsyncClient(transport=mitm, headers=headers) as victim_client:
-        body = await fetch_blob(victim_client, d["url"])
+        if ctx.verify:
+            async with connect(ctx.mcp, ctx.key) as (s2, _):
+                key = await trusted_public_key(s2)
+            try:
+                body = await fetch_verified(victim_client, d, expected_source=rid, public_key=key)
+            except IntegrityError as exc:
+                return result("NOT_REPRODUCED", f"a man in the middle rewrote {mitm.hits} stored values in flight; the client "
+                              f"refused the payload: {exc}", altered_cells=0)
+        else:
+            body = await fetch_blob(victim_client, d["url"])
     try:
         got = pa.ipc.open_file(pa.BufferReader(body)).read_all().column("balance").to_pylist()
     except Exception as exc:
@@ -298,6 +325,7 @@ class Ctx:
         self.mcp = f"{args.base}/mcp/mcp"
         self.key = args.api_key
         self.key2 = args.second_key
+        self.verify = args.verify
         self.replay_delay = args.replay_delay
 
 
@@ -306,6 +334,7 @@ async def main():
     parser.add_argument("--base", default="http://localhost:8000")
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--second-key", default=None, help="a second principal's key; T1 and T7 then use two principals")
+    parser.add_argument("--verify", action="store_true", help="the client checks signed grants and digests (T4, T5)")
     parser.add_argument("--label", default="open")
     parser.add_argument("--replay-delay", type=float, default=5.0)
     parser.add_argument("--only", nargs="*", default=list(ATTACKS))

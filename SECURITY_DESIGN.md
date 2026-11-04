@@ -32,6 +32,14 @@ a compromised server, and side channels.
 | 4 | The client only follows URLs on the MCP server's origin and never sends the bearer key elsewhere | T6 |
 | 5 | Inline text and cells from untrusted data are datamarked inside an envelope; measured against a real model | T9 |
 
+Step 3 details: a grant is `{source, id, arm, path, digest, digest_of, principal, exp}` signed with Ed25519. `source` is the
+result id the tool call was about, and the client refuses a grant issued for any other result (a genuine descriptor swapped in
+for another result still carries a valid signature). Raw byte arms share one digest of the original bytes, hashed once per file
+and checked after the client decompresses, so no codec runs at mint time. Every other blob arm is hashed over the response
+body, which may need the payload encoded at mint time when registration has not already done it; that is the cost the
+security-aware selector has to account for. Streams have no single body: they carry no digest and the verifying client
+refuses them. The client pins the public key from the `signing_public_key` tool.
+
 Expiry only bounds replay; it does not stop a link used within its lifetime. T1, T3 and T7 are only meaningful with
 authentication, so open mode reports them as "requires auth", not as failures.
 

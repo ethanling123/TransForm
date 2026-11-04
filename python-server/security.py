@@ -123,3 +123,37 @@ def verify(path: str, query_string: bytes, principal: str) -> Optional[str]:
     if exp < time.time():
         return "expired"
     return None
+
+
+# ----- Step 3: signed descriptors (grants) -----------------------------------------------
+
+import json
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+
+@functools.lru_cache(maxsize=1)
+def _signing_key() -> Ed25519PrivateKey:
+    configured = os.environ.get("TRANSFORM_SIGNING_KEY", "")
+    if configured:
+        return Ed25519PrivateKey.from_private_bytes(base64.b64decode(configured))
+    return Ed25519PrivateKey.generate()
+
+
+def public_key_b64() -> str:
+    raw = _signing_key().public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    return base64.b64encode(raw).decode()
+
+
+def canonical(obj: Any) -> bytes:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()
+
+
+def sign_grant(grant: Dict[str, Any]) -> Dict[str, Any]:
+    """The grant plus an Ed25519 signature over its canonical JSON.
+
+    A grant says: for the call about `source`, the handle `id` is served at `path`, and its bytes (`digest_of`: "wire", the
+    response body, or "raw", the content after the client undoes the arm's compression) hash to `digest`.
+    """
+    return {**grant, "sig": base64.b64encode(_signing_key().sign(canonical(grant))).decode()}
