@@ -316,6 +316,8 @@ def main():
     model_aware = generated_block("model_aware/summary.md")
     bandit = generated_block("payloads/bandit_replay.md")
     reuse = generated_block("data_plane/reuse_census.md")
+    run_module("benchmarks.analysis.security")
+    security_block = generated_block("security/summary.md")
     attacks_table, attacks_evidence = attacks_section()
 
     text = f"""# TransForm: Python server restoration, results and benchmark checks
@@ -637,6 +639,39 @@ inflates it on the fast links by a few milliseconds per payload; read it as an u
 
 {reuse}
 
+### 18. Security defences (`TRANSFORM_SECURE=1`, branch `security-defences`)
+
+Five defences, all behind one flag so the section 15 numbers and every other result stay comparable (design and threat model:
+`SECURITY_DESIGN.md`). Each column below is the attack suite rerun with that defence and the ones before it on, two principals
+(alice, bob) for T1 and T7, link lifetime 3 s so the 5 s replay in T2 lands after expiry, and the verifying client for T4 to T6.
+
+1. **Principals.** Each key is a principal; every result handle records its creator and is invisible (an ordinary 404) to others.
+2. **Signed, expiring, principal-bound links.** `exp` and an HMAC over path, principal and expiry.
+3. **Signed descriptors.** An Ed25519 grant naming the result the call was about, the path and the payload digest; the client
+   checks the signature, the source, the path and the digest.
+4. **Client origin allowlist.** The client refuses any request, bearer key included, to an origin other than the MCP server's.
+5. **Untrusted-data envelope** for inline text and JSON: random per-response boundary, a notice, and datamarking.
+
+#### Attacks after each defence
+
+{security_block}
+
+How to read it. Steps 1 and 2 are what object stores already do (per-tenant access control, presigned URLs), so they are
+baseline, not contribution. T3 was already blocked by the shared key; the defended run shows only that a link is no use
+to a caller without the key, not that the link stays out of the model's context, which is the EchoLeak pattern and is not fixed.
+Expiry bounds replay (T2) but a link can still be reused within its lifetime. The T9 "blocked" cell is a structural verdict (the
+injected instruction is no longer readable text and sits in a random boundary), not a claim that models ignore it: the model
+experiment above is the evidence, and under datamarking 8% of text trials still followed an injection (`role_spoof`, `user_note`).
+The envelope alone (no datamarking) did nothing for text on this model; the marking carries the effect. Utility on clean data
+was unchanged (15/15), and 6 of 90 text answers under attack and datamarking lost the correct answer.
+
+Limits: one small local model (`qwen2.5vl:7b`), a canary-token attack, one injection per trial, and the tool result shown as a
+user turn rather than as a host would render it. `exfil_link` never worked on this model even without a defence, so it says
+nothing about the defence. Streams carry no digest and the verifying client refuses them. `large_json` and the raw-row tools are
+outside the envelope. The client library is part of the trusted base: a host that fetches URLs itself gets none of steps 3 and 4.
+The cost of the defences (encode at mint time for table arms, client hashing, expiry versus conditional-fetch reuse) is not
+measured yet, and TLS is not compared.
+
 ## Findings
 
 - On every dataset here the selector sends the fewest bytes of any strategy (tied with always-Parquet on TPC-DS, where it
@@ -723,7 +758,7 @@ inflates it on the fast links by a few milliseconds per payload; read it as an u
 - Localhost latencies are single runs per query; synthetic and TPC-DS cells are medians of 3.
 - Zero-row results are rejected by the server and are excluded (Spider: see section 2).
 - Security: section 15 demonstrates nine attacks on the Python server (eight work with no key, seven with the shared key).
-  It is not an audit, no defence exists yet, and the Java server was not attacked. Reading the Java server's code showed
+  It is not an audit and the Java server was not attacked; the defences are in section 18, on a separate branch. Reading the Java server's code showed
   a single shared bearer key (when set), no result expiry and wide-open CORS. Whether T3 and T8 matter depends on the key
   configuration: T3 was blocked only by the shared key, and T8 found no credential in tool output.
 - The zstd and brotli arms, the tiny-text rule and the already-compressed check exist only in the Python server; the Java
@@ -751,6 +786,8 @@ SKIP_JAVA=1 benchmarks/scripts/run_all.sh     # Python server only
 # not part of run_all.sh:
 benchmarks/scripts/run_paper_repro.sh         # section 14 (the paper's harness; SERVER=java for the Java rerun)
 benchmarks/scripts/run_attacks.sh             # section 15
+benchmarks/scripts/run_attacks_defended.sh    # section 18, attacks with TRANSFORM_SECURE=1
+.venv/bin/python -m benchmarks.analysis.injection   # section 18, envelope on a model (needs Ollama)
 benchmarks/scripts/run_netem_docker.sh        # section 16 (needs Docker running); see its QUICK_ARGS for section 17
 benchmarks/scripts/run_tpcds_once.sh <csv>   # section 17, item 1
 benchmarks/scripts/run_defaults.sh            # section 12 (BIRD); run_defaults_tpcds.sh for TPC-DS
