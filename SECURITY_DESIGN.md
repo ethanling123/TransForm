@@ -40,6 +40,12 @@ body, which may need the payload encoded at mint time when registration has not 
 security-aware selector has to account for. Streams have no single body: they carry no digest and the verifying client
 refuses them. The client pins the public key from the `signing_public_key` tool.
 
+Step 4 details: `client.mcp_client.connect(strict_origins=...)`, on by default when `TRANSFORM_SECURE=1`, makes the returned
+HTTP client raise `ForeignOriginError` before sending any request, and so any bearer key, to an origin other than the MCP
+server's. A loopback server also allows the other loopback spellings on its port (the server writes `localhost` into the URLs it
+mints). When the server is reached by another name than the one in its URLs (the Docker setup), list the URL origin in
+`TRANSFORM_ALLOWED_ORIGINS`. The client library is part of the trusted base; a host that fetches URLs without it is not covered.
+
 Expiry only bounds replay; it does not stop a link used within its lifetime. T1, T3 and T7 are only meaningful with
 authentication, so open mode reports them as "requires auth", not as failures.
 

@@ -13,7 +13,8 @@ import hashlib
 
 import os
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Iterable, Optional
+from urllib.parse import urlsplit
 
 # Normalized hints dict for server-side format selection responses
 FormatHints = Dict[str, Any]
@@ -29,6 +30,44 @@ MCP_API_KEY_ENV = "MCP_API_KEY"
 
 # Default MCP URL for the Java server (streamable HTTP at /mcp/mcp)
 DEFAULT_MCP_URL = "http://localhost:8000/mcp/mcp"
+
+
+class ForeignOriginError(Exception):
+    """A request to an origin the client was not configured to talk to (descriptor URLs are untrusted input)."""
+
+
+_LOOPBACK = ("localhost", "127.0.0.1", "[::1]")
+
+
+def _origin(url: str) -> tuple:
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    host = f"[{host}]" if ":" in host else host
+    return parts.scheme, host, parts.port or (443 if parts.scheme == "https" else 80)
+
+
+def allowed_origins(base_url: str, extra: Iterable[str] = ()) -> set:
+    """Origins the client may contact: the MCP server's, any in `extra` or TRANSFORM_ALLOWED_ORIGINS, and, for a loopback
+    server, the other loopback spellings of it (the Python server writes `localhost` into the URLs it mints)."""
+    allowed = {_origin(base_url)}
+    scheme, host, port = _origin(base_url)
+    if host in _LOOPBACK:
+        allowed |= {(scheme, h, port) for h in _LOOPBACK}
+    configured = [o for o in os.environ.get("TRANSFORM_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+    allowed |= {_origin(o.strip()) for o in [*extra, *configured]}
+    return allowed
+
+
+def _strict_default() -> bool:
+    return os.environ.get("TRANSFORM_SECURE", "").strip().lower() in ("1", "true", "yes")
+
+
+def _origin_guard(allowed: set):
+    async def refuse_foreign(request: httpx.Request) -> None:
+        if _origin(str(request.url)) not in allowed:
+            raise ForeignOriginError(f"refusing to contact {request.url.scheme}://{request.url.netloc.decode()}: "
+                                     f"not the MCP server's origin")
+    return refuse_foreign
 
 
 def _unwrap_structured_content(data: Any) -> Any:
@@ -50,17 +89,24 @@ def _auth_headers(api_key: Optional[str]) -> Dict[str, str]:
 async def connect(
     base_url: str = DEFAULT_MCP_URL,
     api_key: Optional[str] = None,
+    strict_origins: Optional[bool] = None,
+    extra_origins: Iterable[str] = (),
 ):
     """
     Connect to the MCP server. Use as: async with connect() as (session, client): ...
 
     When MCP_API_KEY is set (or api_key is passed), the client sends
     Authorization: Bearer <key> on MCP and on blob/stream fetches.
+
+    With strict_origins (default: on when TRANSFORM_SECURE=1) the returned client raises ForeignOriginError instead of
+    sending a request, and so also the key, to any origin other than the MCP server's (see allowed_origins).
     """
     headers = _auth_headers(api_key)
+    strict = _strict_default() if strict_origins is None else strict_origins
+    hooks = {"request": [_origin_guard(allowed_origins(base_url, extra_origins))]} if strict else {}
 
     if headers:
-        async with httpx.AsyncClient(headers=headers) as http_client:
+        async with httpx.AsyncClient(headers=headers, event_hooks=hooks) as http_client:
             async with streamable_http_client(base_url, http_client=http_client) as (
                 read_stream,
                 write_stream,
@@ -73,7 +119,7 @@ async def connect(
         async with streamable_http_client(base_url) as (read_stream, write_stream, *_rest):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(event_hooks=hooks) as client:
                     yield session, client
 
 

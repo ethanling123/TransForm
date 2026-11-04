@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import security  # noqa: E402
 import server_app as S  # noqa: E402
 import shared  # noqa: E402
-from client import verify  # noqa: E402
+from client import mcp_client, verify  # noqa: E402
 
 KEYS = "alice:key-alice,bob:key-bob"
 ALICE = {"Authorization": "Bearer key-alice"}
@@ -295,6 +295,55 @@ class SignedDescriptors(SecureTestCase):
             out = S.large_result_auto(0, 0, result_id=rid, optimization_target="min_bytes").structured_content
         self.assertEqual(out["payload"]["grant"]["source"], rid)
         self.assertEqual(self.fetch(out, rid), TEXT)
+
+
+class OriginGuard(unittest.TestCase):
+    def client(self, base="http://server:8000/mcp/mcp", **kwargs):
+        seen = []
+
+        def respond(request):
+            seen.append(request)
+            return httpx.Response(200, content=b"ok")
+
+        hooks = {"request": [mcp_client._origin_guard(mcp_client.allowed_origins(base, **kwargs))]}
+        return httpx.AsyncClient(transport=httpx.MockTransport(respond), headers={"Authorization": "Bearer secret"}, event_hooks=hooks), seen
+
+    def get(self, client, url):
+        async def go():
+            async with client as c:
+                return await c.get(url)
+        return asyncio.run(go())
+
+    def test_the_mcp_servers_own_origin_is_allowed(self):
+        client, seen = self.client()
+        self.assertEqual(self.get(client, "http://server:8000/blobs/x.parquet").content, b"ok")
+        self.assertEqual(seen[0].headers["authorization"], "Bearer secret")
+
+    def test_another_host_is_refused_before_anything_is_sent(self):
+        client, seen = self.client()
+        with self.assertRaises(mcp_client.ForeignOriginError):
+            self.get(client, "http://attacker.example/steal")
+        self.assertEqual(seen, [])
+
+    def test_another_port_on_the_same_host_is_a_different_origin(self):
+        client, seen = self.client()
+        with self.assertRaises(mcp_client.ForeignOriginError):
+            self.get(client, "http://server:9999/x")
+
+    def test_a_loopback_server_also_allows_the_other_loopback_spellings(self):
+        client, _ = self.client("http://127.0.0.1:8000/mcp/mcp")
+        self.assertEqual(self.get(client, "http://localhost:8000/blobs/x.parquet").content, b"ok")
+
+    def test_extra_origins_are_allowed_when_configured(self):
+        client, _ = self.client(extra=["http://cdn.internal:9000"])
+        self.assertEqual(self.get(client, "http://cdn.internal:9000/x").content, b"ok")
+
+    def test_strict_origins_follow_the_secure_flag(self):
+        os.environ.pop("TRANSFORM_SECURE", None)
+        self.assertFalse(mcp_client._strict_default())
+        os.environ["TRANSFORM_SECURE"] = "1"
+        self.addCleanup(os.environ.pop, "TRANSFORM_SECURE", None)
+        self.assertTrue(mcp_client._strict_default())
 
 
 class FlagOff(unittest.TestCase):
