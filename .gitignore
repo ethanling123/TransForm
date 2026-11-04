@@ -60,6 +60,7 @@ docs/*
 scripts/
 *.md
 !README.md
+!SECURITY_DESIGN.md
 !docs/superpowers/**/*.md
 
 # --- Vendored SDK noise (runtime needs src + build metadata only) ---

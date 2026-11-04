@@ -74,6 +74,7 @@ from mcp.types import CallToolResult, TextContent  # type: ignore  # noqa: E402
 import arms  # noqa: E402
 import cost_model  # noqa: E402
 import link_estimator  # noqa: E402
+import security  # noqa: E402
 from arms import REGISTRY  # noqa: E402
 from format_selector import (  # noqa: E402
     OptimizationTarget,
@@ -134,10 +135,11 @@ class ResultConfig:
     # different codec fall through to a live encode).
     cached_parquet_codec: Optional[Tuple[str, str]] = None
     cached_arrow_ipc_codec: Optional[str] = None
+    owner: Optional[str] = None  # principal that created this handle (TRANSFORM_SECURE=1)
 
 
 # Simple in-memory registry keyed by UUIDs returned from tools.
-RESULT_REGISTRY: Dict[str, ResultConfig] = {}
+RESULT_REGISTRY: Dict[str, ResultConfig] = security.OwnedRegistry()
 
 
 # Derived (per-format fetch) ids that share a source result's cached buffers, so evicting
@@ -200,12 +202,12 @@ def _result_cache_max_bytes() -> int:
 def _payload_cache_clear_entry(result_id: str) -> None:
     """Drop cached payload buffers (but keep ResultConfig + cached_hints)."""
     global _PAYLOAD_CACHE_TOTAL_BYTES
-    cfg = RESULT_REGISTRY.get(result_id)
+    cfg = RESULT_REGISTRY.raw(result_id)
     prev = _PAYLOAD_CACHE_LRU.pop(result_id, 0)
     _PAYLOAD_CACHE_TOTAL_BYTES -= prev
     if _PAYLOAD_CACHE_TOTAL_BYTES < 0:
         _PAYLOAD_CACHE_TOTAL_BYTES = 0
-    for target in [cfg] + [RESULT_REGISTRY.get(d) for d in _DERIVED_BY_SOURCE.pop(result_id, [])]:
+    for target in [cfg] + [RESULT_REGISTRY.raw(d) for d in _DERIVED_BY_SOURCE.pop(result_id, [])]:
         if target is not None:
             target.cached_dataframe = None
             target.cached_arrow_table = None
@@ -3499,6 +3501,10 @@ class BearerAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
+        if security.enabled():
+            await self._call_secure(scope, receive, send)
+            return
+
         if self._expected_key is None or self._expected_key == "":
             await self.app(scope, receive, send)
             return
@@ -3519,6 +3525,24 @@ class BearerAuthMiddleware:
             return
 
         await self.app(scope, receive, send)
+
+    async def _call_secure(self, scope: Scope, receive: Receive, send: Send) -> None:
+        keys = security.load_keys()
+        principal = security.ANONYMOUS
+        if keys:
+            auth_header = dict(scope.get("headers", [])).get(b"authorization", b"").decode("latin-1").strip()
+            if not auth_header.lower().startswith("bearer "):
+                await self._send_401(send, "Missing or invalid Authorization header")
+                return
+            principal = security.principal_for(auth_header[7:].strip(), keys)
+            if principal is None:
+                await self._send_401(send, "Invalid API key")
+                return
+        reset = security.current_principal.set(principal)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            security.current_principal.reset(reset)
 
     async def _send_401(self, send: Send, detail: str) -> None:
         body = json.dumps({"error": "unauthorized", "detail": detail}).encode("utf-8")

