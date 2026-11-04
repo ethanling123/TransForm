@@ -46,6 +46,15 @@ server's. A loopback server also allows the other loopback spellings on its port
 mints). When the server is reached by another name than the one in its URLs (the Docker setup), list the URL origin in
 `TRANSFORM_ALLOWED_ORIGINS`. The client library is part of the trusted base; a host that fetches URLs without it is not covered.
 
+Step 5 details: with `TRANSFORM_SECURE=1`, inline text and inline JSON records from `large_result_auto` become untrusted
+payloads: `untrusted`, a `notice` for the model, a random per-response `boundary` (text is wrapped in `<<<DATA id>>>` and
+`<<<END id>>>`, so data cannot forge its own closing delimiter), and, in the default `datamark` mode, every space in the text
+or in string cells replaced by a marker character that does not occur in the data (spotlighting, Hines et al. 2024). The
+marking is lossless; `client.verify.open_payload` restores the original. `TRANSFORM_ENVELOPE=boundary|none` selects weaker
+modes for the ablation. `large_json` and the table tools that return raw rows are outside the envelope. Whether a model
+still follows a datamarked instruction is measured with `benchmarks/analysis/injection.py`; the T9 check in
+`run_attacks.py` only tests that the instruction is no longer readable text, because a label is not a defence.
+
 Expiry only bounds replay; it does not stop a link used within its lifetime. T1, T3 and T7 are only meaningful with
 authentication, so open mode reports them as "requires auth", not as failures.
 

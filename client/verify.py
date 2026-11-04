@@ -81,3 +81,27 @@ async def fetch_verified(client: httpx.AsyncClient, out: Dict[str, Any], *, expe
     if hashlib.sha256(body).hexdigest() != grant["digest"]:
         raise IntegrityError("fetched bytes do not match the signed digest")
     return body
+
+
+def open_payload(payload: Dict[str, Any]) -> Any:
+    """The original text or records from an inline payload; for untrusted ones, checks the boundary and undoes the datamarking."""
+    marker = payload.get("marker")
+    if not payload.get("untrusted"):
+        return payload["text"] if payload["kind"] == "text" else payload["records"]
+    if payload["kind"] == "text":
+        head, tail = f"<<<DATA {payload['boundary']}>>>\n", f"\n<<<END {payload['boundary']}>>>"
+        body = payload["text"]
+        if not (body.startswith(head) and body.endswith(tail)):
+            raise IntegrityError("inline text is not inside its boundary")
+        body = body[len(head):-len(tail)]
+        return body.replace(marker, " ") if marker else body
+
+    def restore(value):
+        if isinstance(value, str):
+            return value.replace(marker, " ")
+        if isinstance(value, dict):
+            return {k: restore(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [restore(v) for v in value]
+        return value
+    return restore(payload["records"]) if marker else payload["records"]

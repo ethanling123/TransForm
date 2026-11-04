@@ -317,6 +317,14 @@ async def t9(ctx):
     verbatim = [INJECTION.split("\n")[0] in json.loads(x).get("payload", {}).get("text", json.dumps(json.loads(x)["payload"]))
                 for x in flat]
     marked = [bool(re.search(r"untrusted|provenance|delimiter|data_only", x, re.I)) for x in flat]
+    if ctx.verify:  # a label is not a defence: the verdict is whether the instruction reaches the model as readable text
+        phrase = "ignore all previous instructions"
+        intact = [phrase in json.dumps(json.loads(x)["payload"]).lower() for x in flat]
+        boundary = [bool(json.loads(x)["payload"].get("boundary")) for x in flat]
+        return result("VULNERABLE" if any(intact) else "NOT_REPRODUCED",
+                      f"the injected instruction is still readable in the payload: {intact} (datamarked otherwise); payloads are "
+                      f"inside a per-response random boundary: {boundary}. Whether a model still follows a datamarked instruction "
+                      f"is measured separately (benchmarks/analysis/injection.py)", phrase_intact=intact, boundary=boundary)
     return result("VULNERABLE" if all(verbatim) and not any(marked) else "NOT_REPRODUCED",
                   f"inline text payload kind={text_out['payload']['kind']}, inline table payload kind={tab_out['payload']['kind']}; "
                   f"injected closing tag and instruction passed through verbatim in both: {verbatim}; "

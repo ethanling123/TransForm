@@ -1420,7 +1420,7 @@ def bird_query_run_inline(
                 "payload_kind": "tabular",
                 "chosen_format": "json",
                 "optimization_target": sel_target.value,
-                "payload": {"kind": "json", "records": records},
+                "payload": security.wrap_records(records, f"result {result_id}" if result_id else "a tool result"),
                 "decode": {"encoding": "json_records", "transport": "inline"},
             }
             return CallToolResult(
@@ -2093,7 +2093,7 @@ def large_result_auto(
                         "payload_kind": "unstructured",
                         "chosen_format": "text_inline",
                         "optimization_target": sel_target.value,
-                        "payload": {"kind": "text", "text": text},
+                        "payload": security.wrap_text(text, f"result {result_id}"),
                         "decode": {
                             "encoding": "text",
                             "transport": "inline",
@@ -2273,7 +2273,7 @@ def large_result_auto(
                 "payload_kind": "tabular",
                 "chosen_format": "json",
                 "optimization_target": sel_target.value,
-                "payload": {"kind": "json", "records": records},
+                "payload": security.wrap_records(records, f"result {result_id}" if result_id else "a tool result"),
                 "decode": {"encoding": "json_records", "transport": "inline"},
             }
             return CallToolResult(
