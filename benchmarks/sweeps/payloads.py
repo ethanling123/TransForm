@@ -26,10 +26,12 @@ import httpx
 import pyarrow as pa
 
 from client.mcp_client import connect
+from client.verify import open_payload
 
 MIME = {".png": "image/png", ".wav": "audio/wav", ".json": "application/json", ".csv": "text/csv", ".md": "text/markdown",
         ".txt": "text/plain", ".java": "text/x-java"}
 FORCED = {"raw": "raw", "gzip": "raw-gzip", "zstd": "raw-zstd", "brotli": "raw-brotli"}
+ARM = {"raw": "raw_blob", "gzip": "gzip_blob", "zstd": "zstd_blob", "brotli": "brotli_blob"}
 CODEC_OF_ARM = {"zstd_blob": "zstd", "brotli_blob": "brotli"}
 
 
@@ -95,8 +97,8 @@ async def upload(client, server_port, data, mime) -> str:
 async def run_forced(session, client, args, name, data, mime, strategy):
     rid = await upload(client, args.server_port, data, mime)
     t = time.perf_counter()
-    await session.send_ping()  # stands in for the tool call that returns the URL; the selector rows make a real one
-    resp = await client.get(f"http://localhost:{args.port}/{FORCED[strategy]}/{rid}")
+    desc = (await session.call_tool("fetch_arm", arguments={"arm": ARM[strategy], "result_id": rid})).structuredContent
+    resp = await client.get(via(desc["url"], args.server_port, args.port))
     resp.raise_for_status()
     decoded = decode_blob(resp, strategy if strategy in ("zstd", "brotli") else None)
     return strategy, resp.num_bytes_downloaded, time.perf_counter() - t, "", decoded == data
@@ -111,7 +113,7 @@ async def run_selector(session, client, args, name, data, mime, target):
     out = result.structuredContent
     chosen, decode = out["chosen_format"], out["decode"]
     if decode["transport"] == "inline":
-        text = out["payload"]["text"]
+        text = open_payload(out["payload"])
         wire, decoded = len(text.encode()), text.encode()
     else:
         resp = await client.get(via(decode["url"], args.server_port, args.port))

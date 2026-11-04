@@ -318,6 +318,8 @@ def main():
     reuse = generated_block("data_plane/reuse_census.md")
     run_module("benchmarks.analysis.security")
     security_block = generated_block("security/summary.md")
+    run_module("benchmarks.analysis.security_overhead")
+    overhead_block = generated_block("security_overhead/summary.md")
     attacks_table, attacks_evidence = attacks_section()
 
     text = f"""# TransForm: Python server restoration, results and benchmark checks
@@ -669,8 +671,25 @@ Limits: one small local model (`qwen2.5vl:7b`), a canary-token attack, one injec
 user turn rather than as a host would render it. `exfil_link` never worked on this model even without a defence, so it says
 nothing about the defence. Streams carry no digest and the verifying client refuses them. `large_json` and the raw-row tools are
 outside the envelope. The client library is part of the trusted base: a host that fetches URLs itself gets none of steps 3 and 4.
-The cost of the defences (encode at mint time for table arms, client hashing, expiry versus conditional-fetch reuse) is not
-measured yet, and TLS is not compared.
+Expiry versus conditional-fetch reuse, TLS, and a non-localhost link are not measured.
+
+#### What the defences cost (localhost, unshaped, quick runs)
+
+`benchmarks/scripts/run_security_overhead.sh`: the BIRD sweep (every 10th query) and the network-check suite, run with
+`TRANSFORM_SECURE` off and on, two rounds each in alternating order. The "mint" rows are the descriptor call, the "fetch"
+rows the download.
+
+{overhead_block}
+
+Reading it. Wire bytes are identical with the defences on, so nothing here changes what a slow link carries. On BIRD the
+cost is within noise (about 2%): results are small and registration has already encoded them, so the grant digest is free
+and the link signature is microseconds. The network-check suite shows 1.0x to 1.4x on operations of 4 to 30 ms, which is
+mostly noise at this scale: two rounds with the defences off differ by a median of 1.09x and up to 2.7x per row, and `zstd` on
+1 MB incompressible bytes came out 32% faster with them on. The most likely real cost is on table arms that registration has not already encoded,
+where the grant forces an encode at mint time (among the table arms `arrow_ipc_blob` has the highest ratio, 1.18x to 1.26x);
+this run did not isolate it. Two limits: the benchmark clients do not verify grants or digests, so the client-side checks are costed
+separately in the last line (hashing at memory speed, a signature check in tens of microseconds), and localhost hides what
+matters on a real link, where these extra milliseconds are small next to transfer time but a forced encode of a large table is not.
 
 ## Findings
 
@@ -787,6 +806,7 @@ SKIP_JAVA=1 benchmarks/scripts/run_all.sh     # Python server only
 benchmarks/scripts/run_paper_repro.sh         # section 14 (the paper's harness; SERVER=java for the Java rerun)
 benchmarks/scripts/run_attacks.sh             # section 15
 benchmarks/scripts/run_attacks_defended.sh    # section 18, attacks with TRANSFORM_SECURE=1
+benchmarks/scripts/run_security_overhead.sh   # section 18, overhead (about 3 minutes)
 .venv/bin/python -m benchmarks.analysis.injection   # section 18, envelope on a model (needs Ollama)
 benchmarks/scripts/run_netem_docker.sh        # section 16 (needs Docker running); see its QUICK_ARGS for section 17
 benchmarks/scripts/run_tpcds_once.sh <csv>   # section 17, item 1

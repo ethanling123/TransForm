@@ -1211,8 +1211,55 @@ Limits: one small local model (`qwen2.5vl:7b`), a canary-token attack, one injec
 user turn rather than as a host would render it. `exfil_link` never worked on this model even without a defence, so it says
 nothing about the defence. Streams carry no digest and the verifying client refuses them. `large_json` and the raw-row tools are
 outside the envelope. The client library is part of the trusted base: a host that fetches URLs itself gets none of steps 3 and 4.
-The cost of the defences (encode at mint time for table arms, client hashing, expiry versus conditional-fetch reuse) is not
-measured yet, and TLS is not compared.
+Expiry versus conditional-fetch reuse, TLS, and a non-localhost link are not measured.
+
+#### What the defences cost (localhost, unshaped, quick runs)
+
+`benchmarks/scripts/run_security_overhead.sh`: the BIRD sweep (every 10th query) and the network-check suite, run with
+`TRANSFORM_SECURE` off and on, two rounds each in alternating order. The "mint" rows are the descriptor call, the "fetch"
+rows the download.
+
+| Arm | Part | off, round 1 | off, round 2 | on, round 1 | on, round 2 | on / off |
+|---|---|---|---|---|---|---|
+| parquet_blob | mint (median ms) | 2.2 | 2.0 | 2.3 | 2.0 | 1.02x |
+| parquet_blob | fetch (median ms) | 1.3 | 1.3 | 1.4 | 1.3 | 1.03x |
+| arrow_ipc_blob | mint (median ms) | 2.0 | 1.8 | 2.1 | 1.8 | 1.02x |
+| arrow_ipc_blob | fetch (median ms) | 1.0 | 0.9 | 1.0 | 0.9 | 1.02x |
+
+154 BIRD queries (every 10th), median per query; payload bytes identical with the defences on: True.
+
+| Workload | Strategy | Bytes off / on | off (ms, mean of rounds) | on (ms) | on / off |
+|---|---|---|---|---|---|
+| generated 50000x10 | json | 8,063,463 / 8,063,463 | 1070.1 | 1083.4 | 1.01x |
+| generated 50000x10 | parquet_blob | 3,288,624 / 3,288,624 | 8.8 | 9.8 | 1.11x |
+| generated 50000x10 | arrow_ipc_blob | 4,404,778 / 4,404,778 | 8.2 | 10.3 | 1.26x |
+| generated 50000x10 | selector min_latency | 3,288,624 / 3,288,624 | 6.2 | 8.5 | 1.37x |
+| uploaded 50000x6 mixed | json | 6,623,416 / 6,623,416 | 1122.2 | 1110.1 | 0.99x |
+| uploaded 50000x6 mixed | parquet_blob | 2,122,651 / 2,122,651 | 7.9 | 8.4 | 1.06x |
+| uploaded 50000x6 mixed | arrow_ipc_blob | 3,138,698 / 3,138,698 | 7.1 | 8.3 | 1.18x |
+| uploaded 50000x6 mixed | selector min_latency | 2,122,651 / 2,122,651 | 5.5 | 6.2 | 1.12x |
+| text 600 KB (compressible) | raw | 579,490 / 579,490 | 3.4 | 4.0 | 1.19x |
+| text 600 KB (compressible) | gzip | 50,899 / 50,899 | 8.1 | 8.8 | 1.09x |
+| text 600 KB (compressible) | zstd | 30,735 / 30,735 | 5.1 | 5.1 | 1.01x |
+| text 600 KB (compressible) | brotli | 18,902 / 18,902 | 6.6 | 6.6 | 1.00x |
+| text 600 KB (compressible) | selector min_latency | 18,902 / 18,902 | 13.8 | 17.6 | 1.28x |
+| bytes 1 MB (incompressible) | raw | 1,000,000 / 1,000,000 | 4.0 | 5.3 | 1.31x |
+| bytes 1 MB (incompressible) | gzip | 1,000,328 / 1,000,328 | 19.7 | 28.3 | 1.44x |
+| bytes 1 MB (incompressible) | zstd | 1,000,033 / 1,000,033 | 10.1 | 6.9 | 0.68x |
+| bytes 1 MB (incompressible) | brotli | 1,000,005 / 1,000,005 | 7.5 | 7.4 | 0.98x |
+| bytes 1 MB (incompressible) | selector min_latency | 1,000,000 / 1,000,000 | 27.3 | 28.5 | 1.04x |
+
+Checks the benchmark clients above do not run, measured separately: client sha256 over a payload runs at 2,999 MB/s (0.33 ms per MB); verifying one grant signature takes 39 us and signing one takes 16 us.
+
+Reading it. Wire bytes are identical with the defences on, so nothing here changes what a slow link carries. On BIRD the
+cost is within noise (about 2%): results are small and registration has already encoded them, so the grant digest is free
+and the link signature is microseconds. The network-check suite shows 1.0x to 1.4x on operations of 4 to 30 ms, which is
+mostly noise at this scale: two rounds with the defences off differ by a median of 1.09x and up to 2.7x per row, and `zstd` on
+1 MB incompressible bytes came out 32% faster with them on. The most likely real cost is on table arms that registration has not already encoded,
+where the grant forces an encode at mint time (among the table arms `arrow_ipc_blob` has the highest ratio, 1.18x to 1.26x);
+this run did not isolate it. Two limits: the benchmark clients do not verify grants or digests, so the client-side checks are costed
+separately in the last line (hashing at memory speed, a signature check in tens of microseconds), and localhost hides what
+matters on a real link, where these extra milliseconds are small next to transfer time but a forced encode of a large table is not.
 
 ## Findings
 
@@ -1332,6 +1379,7 @@ SKIP_JAVA=1 benchmarks/scripts/run_all.sh     # Python server only
 benchmarks/scripts/run_paper_repro.sh         # section 14 (the paper's harness; SERVER=java for the Java rerun)
 benchmarks/scripts/run_attacks.sh             # section 15
 benchmarks/scripts/run_attacks_defended.sh    # section 18, attacks with TRANSFORM_SECURE=1
+benchmarks/scripts/run_security_overhead.sh   # section 18, overhead (about 3 minutes)
 .venv/bin/python -m benchmarks.analysis.injection   # section 18, envelope on a model (needs Ollama)
 benchmarks/scripts/run_netem_docker.sh        # section 16 (needs Docker running); see its QUICK_ARGS for section 17
 benchmarks/scripts/run_tpcds_once.sh <csv>   # section 17, item 1
