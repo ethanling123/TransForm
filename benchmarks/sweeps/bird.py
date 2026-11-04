@@ -9,6 +9,7 @@ import io
 import json
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pyarrow as pa
 import pyarrow.ipc as ipc
@@ -17,10 +18,18 @@ import pyarrow.parquet as pq
 from client.mcp_client import (
     call_bird_query_json,
     call_bird_query_materialize,
+    call_large_arrow_ipc_blob,
+    call_large_parquet_blob,
     connect,
     fetch_blob,
 )
 
+
+
+def rebase(url: str, base_url: str) -> str:
+    """The descriptor's path and signature query on the host this run reaches the server by (a shaped proxy port, say)."""
+    parts = urlsplit(url)
+    return f"{base_url}{parts.path}" + (f"?{parts.query}" if parts.query else "")
 
 
 async def measure_query(session, client, base_url: str, db_id: str, sql: str):
@@ -41,14 +50,20 @@ async def measure_query(session, client, base_url: str, db_id: str, sql: str):
     row["n_cols"] = meta["n_cols"]
 
     t0 = time.perf_counter()
-    data = await fetch_blob(client, f"{base_url}/blobs/{rid}.parquet")
+    parquet_url = rebase((await call_large_parquet_blob(session, 0, 0, result_id=rid))["url"], base_url)
+    row["parquet_mint_s"] = time.perf_counter() - t0  # the descriptor call; kept out of parquet_fetch_s so earlier runs compare
+    t0 = time.perf_counter()
+    data = await fetch_blob(client, parquet_url)
     pq.read_table(io.BytesIO(data))
     row["parquet_fetch_s"] = time.perf_counter() - t0
     row["parquet_s"] = row["materialize_s"] + row["parquet_fetch_s"]
     row["parquet_bytes"] = len(data)
 
     t0 = time.perf_counter()
-    data = await fetch_blob(client, f"{base_url}/ipc-blobs/{rid}.arrow")
+    ipc_url = rebase((await call_large_arrow_ipc_blob(session, 0, 0, result_id=rid))["url"], base_url)
+    row["arrow_ipc_mint_s"] = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    data = await fetch_blob(client, ipc_url)
     ipc.open_file(pa.BufferReader(data)).read_all()
     row["arrow_ipc_fetch_s"] = time.perf_counter() - t0
     row["arrow_ipc_s"] = row["materialize_s"] + row["arrow_ipc_fetch_s"]

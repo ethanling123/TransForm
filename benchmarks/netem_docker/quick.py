@@ -61,6 +61,12 @@ def uploaded_table(n: int) -> pa.Table:
     })
 
 
+async def raw_url(session, rid):
+    """The signed raw-blob URL for a registered payload, from a descriptor rather than built by hand."""
+    out = await session.call_tool("fetch_arm", arguments={"arm": "raw_blob", "result_id": rid})
+    return out.structuredContent["url"]
+
+
 async def table_formats(session, client, rid, n_rows, n_cols):
     """(label, fetch-and-decode coroutine) per format for one table; rid is None for a server-generated table."""
     kw = {} if rid is None else {"result_id": rid}
@@ -133,8 +139,9 @@ async def main():
             pings.append(time.perf_counter() - t)
         rid = (await client.post("http://localhost:8000/materialized-raw", content=os.urandom(4_000_000),
                                  headers={"Content-Type": "application/octet-stream"})).json()["result_id"]
+        link_url = await raw_url(session, rid)
         t = time.perf_counter()
-        resp = await client.get(f"http://localhost:8000/raw/{rid}")
+        resp = await client.get(link_url)
         download_s = time.perf_counter() - t
         record("link", "ping rtt (median)", "", 0, statistics.median(pings))
         record("link", f"4 MB download = {len(resp.content) * 8 / download_s / 1e6:.1f} Mbit/s", "", len(resp.content), download_s)
@@ -149,7 +156,7 @@ async def main():
             await conditional_experiment(session, client, record, args.reps)
             return _write(args.out, rows)
         if args.ranges:
-            await ranges_experiment(client, record, args.reps)
+            await ranges_experiment(session, client, record, args.reps)
             return _write(args.out, rows)
         if args.tables:
             await larger_tables(session, client, record, args.reps)
@@ -207,12 +214,12 @@ async def conditional_experiment(session, client, record, reps):
     record("conditional fetch", "repeat, If-None-Match (304)", "", 0, statistics.median(conditional))
 
 
-async def ranges_experiment(client, record, reps):
+async def ranges_experiment(session, client, record, reps):
     """One payload fetched as N byte ranges over N separate connections; N=0 is a plain GET on the shared connection."""
     data = os.urandom(8_000_000)
     rid = (await client.post("http://localhost:8000/materialized-raw", content=data,
                              headers={"Content-Type": "application/octet-stream"})).json()["result_id"]
-    url = f"http://localhost:8000/raw/{rid}"
+    url = await raw_url(session, rid)
 
     async def part(start, end):
         async with httpx.AsyncClient(timeout=600) as c:
@@ -238,9 +245,10 @@ async def learn_link(session, client, record):
     rid = (await client.post("http://localhost:8000/materialized-raw", content=os.urandom(1_000_000),
                              headers={"Content-Type": "application/octet-stream"})).json()["result_id"]
     estimate = None
+    url = await raw_url(session, rid)
     for _ in range(4):
         t = time.perf_counter()
-        body = (await client.get(f"http://localhost:8000/raw/{rid}")).content
+        body = (await client.get(url)).content
         seconds = time.perf_counter() - t
         out = await session.call_tool("record_format_outcome", arguments={
             "n_rows": 0, "n_cols": 0, "optimization_target": "min_latency", "format_used": "raw_blob",
