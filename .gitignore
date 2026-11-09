@@ -58,6 +58,7 @@ docs/
 scripts/
 *.md
 !README.md
+!CLAUDE.md
 
 # --- Vendored SDK noise (runtime needs src + build metadata only) ---
 java-sdk/conformance-tests/
