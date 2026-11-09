@@ -320,6 +320,9 @@ def main():
     security_block = generated_block("security/summary.md")
     run_module("benchmarks.analysis.security_overhead")
     overhead_block = generated_block("security_overhead/summary.md")
+    run_module("benchmarks.analysis.transport")
+    transport_block = generated_block("netem_docker/transport.md")
+    protocols_block = generated_block("netem_docker/protocols.md")
     attacks_table, attacks_evidence = attacks_section()
 
     text = f"""# TransForm: Python server restoration, results and benchmark checks
@@ -637,6 +640,24 @@ against 2.47x for the global table in the per-draw view; weighted by latency, no
 dominate the total and every arm is close there. The `selector (logged choice)` row paid a real tool call while the forced arms paid a ping, which
 inflates it on the fast links by a few milliseconds per payload; read it as an upper bound.
 
+AdaEdge-style variants (AdaEdge, ICDE 2024, runs one epsilon-greedy bandit per context range, with epsilon 0.1 offline and 0.01
+online; the rows are in the table above and described in `benchmarks/analysis/bandit_replay.py`). In this run: the cost-aware
+selector's estimate as a starting point (the first draw on each link starts every arm at the estimate for that payload,
+instead of trying each arm once) cut the cold-start cost from 1.13x to 1.06x over the first 100 draws and ended at the same 1.05x;
+epsilon 0.01 ended lowest among the bandits (1.04x, and 1.07x per draw) but started slower (1.15x). The cost-aware estimate
+used alone (nothing learned) was 1.02x to 1.03x latency-weighted from the first draw, better than every bandit here. Per draw it
+is 1.61x, because it pays for the 256 KB sample on every payload including the fast links; with no sampling at 1 Gbit/s or faster it is
+1.02x latency-weighted and 1.03x to 1.04x per draw, again ahead of every bandit from the first draw. Learning a multiplicative
+correction on top of the estimate made it worse (1.06x to 1.07x, and 1.76x per draw). A wrong link speed in the estimate (0.25x)
+raised the seeded bandit's first-100-draw cost from 1.06x to 1.19x, above the unseeded 1.13x. Limits: a replay of single measured latencies on
+stationary links, and the compute model is fitted on the same machine's localhost runs (leave one out), which flatters the cost
+model; a bandit's case is drift or a wrong compute model, neither of which this replay tests.
+
+Server bandit fix (not measured end to end): `select_format_with_mab` explored uniformly over all ten arms and, because it
+keeps one reward table per target, could also exploit an arm that does not apply to the payload (for example `text_inline` for a
+table). It now explores and exploits only among the arms that apply: the table arms, or the unstructured arms when the hints carry
+`raw_bytes` (`python-server/tests/test_format_mab.py`). The replay above cannot show the effect, because all four of its arms always apply.
+
 #### 7. How often results repeat
 
 {reuse}
@@ -690,6 +711,59 @@ where the grant forces an encode at mint time (among the table arms `arrow_ipc_b
 this run did not isolate it. Two limits: the benchmark clients do not verify grants or digests, so the client-side checks are costed
 separately in the last line (hashing at memory speed, a signature check in tens of microseconds), and localhost hides what
 matters on a real link, where these extra milliseconds are small next to transfer time but a forced encode of a large table is not.
+
+### 19. Transport: early termination, Arrow Flight and the HTTP protocol
+
+Three questions about the data plane itself, each asked on the kernel-shaped two-container link of section 16 (both machines
+shape their egress with `tc netem`; profiles as there, plus WAN with 1% loss for the protocol runs). The client reaches
+the server directly, with no socat hop, so every arm takes the same path. Five measured repetitions after one warm-up, arm order
+shuffled per repetition, medians. Bytes are the client NIC's receive counter (and transmit counter for the protocol runs), so they
+include headers and anything the server kept sending after the client stopped. Every fetch uses a new connection.
+
+Expectations recorded before the full runs: HTTP/3 saves about one round trip against HTTP/1.1 or HTTP/2 over TLS on a cold
+connection and matters most for parallel fetches under loss; stopping a stream early saves less than the proportional bytes because
+data is already in flight (the pattern was visible in a one-repetition WAN run before the full sweeps).
+
+| # | question | verdict |
+|---|---|---|
+| 1 | does a chunk stream deliver first rows and stop early better than a blob? | **yes for time, less for bytes**: on cellular the first rows arrive 2.9x to 4.3x sooner than from a Parquet blob, and stopping at 10% takes 2.0x to 3.2x less time, but 24% to 34% of the full bytes still arrive, not 10%; 0.4 to 1.0 MB overshoots on WAN and cellular, and on a 2.3 MB table a 50% stop on WAN received all of it |
+| 2 | how does TransForm compare with Arrow Flight? | **equal on the transport, different in the payload**: with the same zstd Arrow batches, Flight is within 4% of TransForm's Parquet stream on TPC-DS on WAN and cellular, and 14% to 18% slower on the mixed table, where Parquet's encodings send 16% fewer bytes; Flight with no compression is 1.2x to 8.1x slower than with zstd; the standard GetFlightInfo step costs one round trip |
+PROTOCOLS_PENDING
+
+#### Method details
+
+`benchmarks/netem_docker/transport.py` fetches one table in units of 8192 rows and stops when it has decoded a target share of
+the rows (the first unit, 10%, 50% or all). Tables: the first 100,000 rows of TPC-DS `catalog_sales` (34 numeric columns) and
+a 100,000-row table of 6 columns with strings and timestamps. TransForm arms run on the unmodified Python server (zstd for Parquet and Arrow
+IPC, the section 12 default) with a counter on its stream generators; Flight serves the same tables with the same batch size over `grpc+tcp` (no TLS,
+as the HTTP data plane here is plain HTTP). Arms: Parquet and Arrow IPC blobs and streams, Flight with no compression, lz4 and zstd and
+with a GetFlightInfo step first, and JSON on the fast links. The descriptor call is not in the data-plane times: both designs need
+one MCP call or equivalent first.
+
+{transport_block}
+
+#### What the data says
+
+Stopping early. A stream's first unit is about 0.2 to 0.5 MB, so first rows cost a round trip plus slow start on that much
+data rather than the whole table. On cellular that is 1.3 s against 5.6 s for the TPC-DS blob and 0.9 s against 2.7 s for
+the mixed one. The bytes saved are smaller than the share skipped: after the client stops, what is already in the pipe still arrives
+(0.4 to 1.0 MB at the 10% stop on WAN and cellular, with both streams and Flight), and the server keeps producing units (5 to 9 produced for 1
+or 2 needed). On a result of a few MB this is most of the table.
+
+Flight. Where the payload is the same (zstd Arrow batches), the transports are indistinguishable: TransForm's Arrow IPC stream
+and Flight with zstd are within 3% of each other on WAN and cellular (both tables), and the extra GetFlightInfo exchange costs one round trip (0.08 s on
+WAN, 0.17 s on cellular). Two things do differ. Flight's default of no compression sends 6.9x the bytes of zstd on TPC-DS and 2.3x
+on the mixed table. And TransForm's Parquet carries encodings that Arrow IPC with zstd does not: dictionary encoding on the mixed table sends 16% fewer
+bytes than the same table through Flight. On an unshaped link Flight is faster (0.02 s against 0.12 s for the TPC-DS table)
+because it sends Arrow batches already in memory, while the TransForm stream encodes Parquet per request; that is an implementation difference, not
+a protocol one, and it disappears once the link is the bottleneck.
+
+#### Limits (section 19)
+
+The emulated links use a very deep queue (`limit 100000`), which probably enlarges the overshoot; it has not been rerun with a queue sized to
+the bandwidth-delay product. Results are streams of an already materialised table, so first-rows times are a lower bound against a live
+query; streaming from the database cursor is not tested. Flight runs without TLS to match the plain-HTTP data plane. One cellular fetch (the
+mixed table, Arrow IPC stream, 50% stop) timed out and is missing from its cell. Bad wifi was run at 3 repetitions on the mixed table only.
 
 ## Findings
 
@@ -809,6 +883,8 @@ benchmarks/scripts/run_attacks_defended.sh    # section 18, attacks with TRANSFO
 benchmarks/scripts/run_security_overhead.sh   # section 18, overhead (about 3 minutes)
 .venv/bin/python -m benchmarks.analysis.injection   # section 18, envelope on a model (needs Ollama)
 benchmarks/scripts/run_netem_docker.sh        # section 16 (needs Docker running); see its QUICK_ARGS for section 17
+benchmarks/scripts/run_transport.sh           # section 19, early termination and Flight (Docker; TRANSPORT_ROWS=100000 as run here)
+benchmarks/scripts/run_protocols.sh           # section 19, HTTP/1.1, HTTP/2 and HTTP/3 (Docker)
 benchmarks/scripts/run_tpcds_once.sh <csv>   # section 17, item 1
 benchmarks/scripts/run_defaults.sh            # section 12 (BIRD); run_defaults_tpcds.sh for TPC-DS
 benchmarks/scripts/run_lossy.sh               # section 10 (needs ollama with qwen2.5vl:7b and mlx-whisper)
