@@ -1,0 +1,16 @@
+{
+	auto_https disable_redirects
+	skip_install_trust
+	local_certs
+}
+
+http://:8080 {
+	root * /srv
+	file_server
+}
+
+https://server:8443 {
+	tls internal
+	root * /srv
+	file_server
+}

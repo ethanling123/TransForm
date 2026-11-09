@@ -1,0 +1,45 @@
+# Early-termination and Flight experiment (transport.py). Like compose.yml, but the client reaches the server directly at
+# server:8000 (HTTP data plane and MCP) and server:8815 (Flight) with no socat hop, so every arm sees the same path.
+# The server container runs the TransForm server with a chunk counter (probe_server.py) and the Flight server.
+services:
+  server:
+    image: transform-netem
+    cap_add: [NET_ADMIN]
+    environment:
+      NETEM_DELAY_MS: ${NETEM_DELAY_MS:-}
+      NETEM_RATE_MBIT: ${NETEM_RATE_MBIT:-}
+      NETEM_LOSS_PCT: ${NETEM_LOSS_PCT:-}
+      TRANSFORM_SCRATCH_DIR: /scratch
+      PARQUET_ENCODING_STRATEGY: data_driven
+      PYTHONPATH: /app
+      TPCDS_PATH: /data/tpcds.parquet
+      TRANSPORT_ROWS: ${TRANSPORT_ROWS:-200000}
+    working_dir: /scratch
+    tmpfs: [/scratch]
+    volumes:
+      - ../../data/tpcds_catalog_sales_sf1.parquet:/data/tpcds.parquet:ro
+    command: ["sh", "-c", "/opt/server/bin/python /app/benchmarks/netem_docker/probe_server.py & exec /opt/server/bin/python /app/benchmarks/netem_docker/flight_server.py"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 2); socket.create_connection(('127.0.0.1', 8815), 2)"]
+      interval: 3s
+      retries: 60
+  client:
+    image: transform-netem
+    cap_add: [NET_ADMIN]
+    depends_on:
+      server: {condition: service_healthy}
+    environment:
+      NETEM_DELAY_MS: ${NETEM_DELAY_MS:-}
+      NETEM_RATE_MBIT: ${NETEM_RATE_MBIT:-}
+      NETEM_LOSS_PCT: ${NETEM_LOSS_PCT:-}
+      PROFILE: ${PROFILE:-unshaped}
+      TRANSPORT_ARGS: ${TRANSPORT_ARGS:-}
+      TRANSPORT_TRACE: ${TRANSPORT_TRACE:-}
+      TRANSPORT_ROWS: ${TRANSPORT_ROWS:-200000}
+      TPCDS_PATH: /data/tpcds.parquet
+      SERVER_HOST: server
+      PYTHONPATH: /app
+    volumes:
+      - ../../results/netem_docker:/out
+      - ../../data/tpcds_catalog_sales_sf1.parquet:/data/tpcds.parquet:ro
+    command: ["sh", "-c", "exec /opt/client/bin/python -m benchmarks.netem_docker.transport --out /out/transport_$$PROFILE.csv $$TRANSPORT_ARGS"]

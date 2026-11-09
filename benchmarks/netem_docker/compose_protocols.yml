@@ -1,0 +1,31 @@
+# Protocol experiment (protocols/main.go): Caddy serves static payloads over plain HTTP/1.1 (:8080) and over TLS with
+# HTTP/1.1, HTTP/2 and HTTP/3 (:8443, TCP and UDP). Both machines shape their egress with tc netem (entrypoint.sh).
+services:
+  server:
+    image: transform-proto-server
+    cap_add: [NET_ADMIN]
+    environment:
+      NETEM_DELAY_MS: ${NETEM_DELAY_MS:-}
+      NETEM_RATE_MBIT: ${NETEM_RATE_MBIT:-}
+      NETEM_LOSS_PCT: ${NETEM_LOSS_PCT:-}
+    volumes:
+      - ../../results/scratch/protocol_payloads:/srv:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/p100k.parquet"]
+      interval: 2s
+      retries: 30
+  client:
+    image: transform-proto-client
+    cap_add: [NET_ADMIN]
+    depends_on:
+      server: {condition: service_healthy}
+    environment:
+      NETEM_DELAY_MS: ${NETEM_DELAY_MS:-}
+      NETEM_RATE_MBIT: ${NETEM_RATE_MBIT:-}
+      NETEM_LOSS_PCT: ${NETEM_LOSS_PCT:-}
+      PROFILE: ${PROFILE:-unshaped}
+      TAG: ${TAG:-single}
+      PROTO_ARGS: ${PROTO_ARGS:-}
+    volumes:
+      - ../../results/netem_docker:/out
+    command: ["sh", "-c", "exec /protoclient -profile $${PROFILE} $${PROTO_ARGS} > /out/protocols_$${PROFILE}_$${TAG}.csv"]
