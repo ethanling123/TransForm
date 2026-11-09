@@ -40,6 +40,27 @@ FORMATS: tuple[FormatName, ...] = (
     "zstd_blob",
     "brotli_blob",
 )
+TABLE_FORMATS: tuple[FormatName, ...] = (
+    "json",
+    "parquet_blob",
+    "parquet_stream",
+    "arrow_ipc_blob",
+    "arrow_ipc_stream",
+)
+UNSTRUCTURED_FORMATS: tuple[FormatName, ...] = (
+    "text_inline",
+    "raw_blob",
+    "gzip_blob",
+    "zstd_blob",
+    "brotli_blob",
+)
+
+
+def _applicable_formats(hints: Optional[HintsDict]) -> tuple[FormatName, ...]:
+    """Arms that can carry the payload: the unstructured set when the hints describe raw bytes, the table set otherwise."""
+    if hints and ("raw_bytes" in hints or "text_inline_bytes" in hints):
+        return UNSTRUCTURED_FORMATS
+    return TABLE_FORMATS
 
 
 def reward_from_outcome(outcome: OutcomeDict, target: OptimizationTarget) -> float:
@@ -131,9 +152,11 @@ def select_format_with_mab(
             return select_format_with_hints(context, hints)
         return select_format(context)
 
+    candidates = _applicable_formats(hints)
+
     # Check if we have any observations
     has_any = any(
-        state_for_target.get(fmt, {}).get("count", 0) > 0 for fmt in FORMATS
+        state_for_target.get(fmt, {}).get("count", 0) > 0 for fmt in candidates
     )
     if not has_any:
         if hints:
@@ -142,12 +165,12 @@ def select_format_with_mab(
 
     eps = epsilon if epsilon is not None else float(os.environ.get("FORMAT_SELECT_EPSILON", "0.1"))
     if random.random() < eps:
-        return random.choice(list(FORMATS))
+        return random.choice(list(candidates))
 
     # Greedy: argmax Q(format) = sum_reward / count
     best_format: Optional[FormatName] = None
     best_q = float("-inf")
-    for fmt in FORMATS:
+    for fmt in candidates:
         stats = state_for_target.get(fmt, {})
         count = stats.get("count", 0) or 0
         if count <= 0:
