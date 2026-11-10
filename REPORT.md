@@ -1289,7 +1289,7 @@ rows the download.
 | bytes 1 MB (incompressible) | brotli | 1,000,005 / 1,000,005 | 7.5 | 7.4 | 0.98x |
 | bytes 1 MB (incompressible) | selector min_latency | 1,000,000 / 1,000,000 | 27.3 | 28.5 | 1.04x |
 
-Checks the benchmark clients above do not run, measured separately: client sha256 over a payload runs at 3,326 MB/s (0.30 ms per MB); verifying one grant signature takes 38 us and signing one takes 15 us.
+Checks the benchmark clients above do not run, measured separately: client sha256 over a payload runs at 3,080 MB/s (0.32 ms per MB); verifying one grant signature takes 37 us and signing one takes 15 us.
 
 Reading it. Wire bytes are identical with the defences on, so nothing here changes what a slow link carries. On BIRD the
 cost is within noise (about 2%): results are small and registration has already encoded them, so the grant digest is free
@@ -1315,7 +1315,7 @@ data is already in flight (the pattern was visible in a one-repetition WAN run b
 
 | # | question | verdict |
 |---|---|---|
-| 1 | does a chunk stream deliver first rows and stop early better than a blob? | **yes for time, less for bytes**: on cellular the first rows arrive 2.9x to 4.3x sooner than from a Parquet blob, and stopping at 10% takes 2.0x to 3.2x less time, but 24% to 34% of the full bytes still arrive, not 10%; 0.4 to 1.0 MB overshoots on WAN and cellular, and on a 2.3 MB table a 50% stop on WAN received all of it |
+| 1 | does a chunk stream deliver first rows and stop early better than a blob? | **yes for time, less for bytes**: on cellular the first rows arrive 2.9x to 4.3x sooner than from a Parquet blob, and stopping at 10% takes 2.3x to 3.5x less time than the full stream, but 24% to 34% of the full bytes still arrive, not 10%; 0.4 to 1.0 MB overshoots on WAN and cellular, and on a 2.3 MB table a 50% stop on WAN received all of it |
 | 2 | how does TransForm compare with Arrow Flight? | **equal on the transport, different in the payload**: with the same zstd Arrow batches, Flight is within 4% of TransForm's Parquet stream on TPC-DS on WAN and cellular, and 14% to 18% slower on the mixed table, where Parquet's encodings send 16% fewer bytes; Flight with no compression is 1.2x to 8.1x slower than with zstd; the standard GetFlightInfo step costs one round trip |
 | 3 | does the HTTP version matter (HTTP/1.1, HTTP/1.1 + TLS, HTTP/2 + TLS, HTTP/3)? | **at the start of a connection, not once it is warm**: on WAN a cold HTTP/3 fetch gets its first byte one round trip (0.085 s) before TLS over TCP and finishes 39% sooner on 100 KB, 27% on 1 MB, 15% on 7.5 MB and 8% on 11 MB; on a warm connection all four are within 7%; eight simultaneous fetches on new connections are fastest with plain HTTP/1.1's eight connections and slowest with HTTP/2 (0.79 s against 0.47 s for 100 KB); at 1% loss the five repetitions do not separate the variants (two of the three TCP variants had interquartile ranges of 38% and 115% on the 8 MB payload), though HTTP/3 has the lowest median on both large payloads; cellular, bad wifi and parallel fetches under loss are not run |
 
@@ -1570,7 +1570,7 @@ the mixed one. The bytes saved are smaller than the share skipped: after the cli
 or 2 needed). On a result of a few MB this is most of the table.
 
 Flight. Where the payload is the same (zstd Arrow batches), the transports are indistinguishable: TransForm's Arrow IPC stream
-and Flight with zstd are within 3% of each other on WAN and cellular (both tables), and the extra GetFlightInfo exchange costs one round trip (0.08 s on
+and Flight with zstd are within 4% of each other on WAN and cellular (both tables), and the extra GetFlightInfo exchange costs one round trip (0.08 s on
 WAN, 0.17 s on cellular). Two things do differ. Flight's default of no compression sends 6.9x the bytes of zstd on TPC-DS and 2.3x
 on the mixed table. And TransForm's Parquet carries encodings that Arrow IPC with zstd does not: dictionary encoding on the mixed table sends 16% fewer
 bytes than the same table through Flight. On an unshaped link Flight is faster (0.02 s against 0.12 s for the TPC-DS table)
@@ -1744,8 +1744,8 @@ control for HTTP/3 against the Linux kernel's for TCP, so part of the HTTP/3 gap
   fetch of one URL, but the ETag is per handle, and results repeat across queries in 10.9% of the BIRD dev gold queries
   and 0.9% of its bytes (an upper bound for content-addressed reuse, which is not built).
 - **Transport (section 19).** On a kernel-shaped cellular link a chunk stream delivers first rows 2.9x to 4.3x sooner than a
-  Parquet blob and stopping at 10% takes 2.0x to 3.2x less time, but 24% to 34% of the bytes still arrive because data in
-  flight keeps coming. Arrow Flight with the same zstd Arrow batches is within 3% of TransForm's Arrow stream on WAN and cellular; against the
+  Parquet blob and stopping at 10% takes 2.3x to 3.5x less time than the full stream, but 24% to 34% of the bytes still arrive because data in
+  flight keeps coming. Arrow Flight with the same zstd Arrow batches is within 4% of TransForm's Arrow stream on WAN and cellular; against the
   Parquet stream it is within 4% on TPC-DS and 14% to 18% slower on a mixed table, where Parquet's encodings send 16% fewer bytes; without compression it sends
   2.3x to 6.9x the bytes. HTTP/3 reaches the first byte one round trip before TLS over TCP and finishes a cold WAN fetch 8% to 39% sooner, a gap that shrinks with
   size and vanishes on a warm connection; eight simultaneous cold fetches are fastest over plain HTTP/1.1's eight connections. Under 1% loss five repetitions do not

@@ -91,3 +91,5 @@ results/format_hints.sqlite*
 !python-server/tests/
 !REPORT.md
 !benchmarks/scripts/
+!benchmarks/netem_docker/Dockerfile
+!benchmarks/netem_docker/protocols/Dockerfile

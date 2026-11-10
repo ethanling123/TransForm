@@ -1420,7 +1420,7 @@ def bird_query_run_inline(
                 "payload_kind": "tabular",
                 "chosen_format": "json",
                 "optimization_target": sel_target.value,
-                "payload": security.wrap_records(records, f"result {result_id}" if result_id else "a tool result"),
+                "payload": security.wrap_records(records, "a tool result"),
                 "decode": {"encoding": "json_records", "transport": "inline"},
             }
             return CallToolResult(
