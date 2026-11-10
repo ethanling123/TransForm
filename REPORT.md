@@ -1111,6 +1111,17 @@ online result.
 | by link | 1.13x | 1.08x | 1.05x |
 | by link+kind | 1.23x | 1.11x | 1.07x |
 | by link+kind+size | 1.10x | 1.14x | 1.10x |
+| by link, eps 0.01 | 1.15x | 1.07x | 1.04x |
+| by link, seeded by cost model | 1.06x | 1.06x | 1.05x |
+| by link, seeded, link believed 0.25x | 1.19x | 1.15x | 1.09x |
+| by link, seeded, link believed 4x | 1.12x | 1.09x | 1.05x |
+| cost model, no sampling at 1 Gbit/s or faster | 1.02x | 1.02x | 1.02x |
+| cost model | 1.03x | 1.03x | 1.02x |
+| cost model + by-link correction | 1.06x | 1.07x | 1.07x |
+| cost model, link believed 0.25x | 1.03x | 1.03x | 1.03x |
+| cost model + by-link correction, link believed 0.25x | 1.08x | 1.07x | 1.06x |
+| cost model, link believed 4x | 1.02x | 1.02x | 1.02x |
+| cost model + by-link correction, link believed 4x | 1.06x | 1.06x | 1.06x |
 | best single arm (hindsight) | 1.01x | 1.01x | 1.01x |
 | best arm per link (hindsight) | 1.01x | 1.01x | 1.01x |
 | selector (logged choice) | 1.09x | 1.09x | 1.09x |
@@ -1123,6 +1134,17 @@ Same replay, but each draw weighted equally instead of by its latency (mean over
 | by link | 1.34x | 1.20x | 1.16x |
 | by link+kind | 1.54x | 1.30x | 1.19x |
 | by link+kind+size | 1.59x | 1.37x | 1.23x |
+| by link, eps 0.01 | 1.25x | 1.12x | 1.07x |
+| by link, seeded by cost model | 1.18x | 1.17x | 1.15x |
+| by link, seeded, link believed 0.25x | 1.23x | 1.21x | 1.17x |
+| by link, seeded, link believed 4x | 1.21x | 1.18x | 1.15x |
+| cost model, no sampling at 1 Gbit/s or faster | 1.03x | 1.03x | 1.04x |
+| cost model | 1.61x | 1.61x | 1.61x |
+| cost model + by-link correction | 1.75x | 1.75x | 1.75x |
+| cost model, link believed 0.25x | 1.62x | 1.62x | 1.62x |
+| cost model + by-link correction, link believed 0.25x | 1.75x | 1.76x | 1.75x |
+| cost model, link believed 4x | 1.61x | 1.61x | 1.61x |
+| cost model + by-link correction, link believed 4x | 1.75x | 1.75x | 1.74x |
 | best single arm (hindsight) | 1.26x | 1.27x | 1.28x |
 | selector (logged choice) | 3.73x | 3.72x | 3.76x |
 
@@ -1130,6 +1152,24 @@ The existing bandit keys on the optimization target only, which is the `global` 
 against 2.47x for the global table in the per-draw view; weighted by latency, no policy beats the best single arm, because the slow links
 dominate the total and every arm is close there. The `selector (logged choice)` row paid a real tool call while the forced arms paid a ping, which
 inflates it on the fast links by a few milliseconds per payload; read it as an upper bound.
+
+AdaEdge-style variants (AdaEdge, ICDE 2024, runs one epsilon-greedy bandit per context range, with epsilon 0.1 offline and 0.01
+online; the rows are in the table above and described in `benchmarks/analysis/bandit_replay.py`). In this run: the cost-aware
+selector's estimate as a starting point (the first draw on each link starts every arm at the estimate for that payload,
+instead of trying each arm once) cut the cold-start cost from 1.13x to 1.06x over the first 100 draws and ended at the same 1.05x;
+epsilon 0.01 ended lowest among the bandits (1.04x, and 1.07x per draw) but started slower (1.15x). The cost-aware estimate
+used alone (nothing learned) was 1.02x to 1.03x latency-weighted from the first draw, better than every bandit here. Per draw it
+is 1.61x, because it pays for the 256 KB sample on every payload including the fast links; with no sampling at 1 Gbit/s or faster it is
+1.02x latency-weighted and 1.03x to 1.04x per draw, again ahead of every bandit from the first draw. Learning a multiplicative
+correction on top of the estimate made it worse (1.06x to 1.07x, and 1.76x per draw). A wrong link speed in the estimate (0.25x)
+raised the seeded bandit's first-100-draw cost from 1.06x to 1.19x, above the unseeded 1.13x. Limits: a replay of single measured latencies on
+stationary links, and the compute model is fitted on the same machine's localhost runs (leave one out), which flatters the cost
+model; a bandit's case is drift or a wrong compute model, neither of which this replay tests.
+
+Server bandit fix (not measured end to end): `select_format_with_mab` explored uniformly over all ten arms and, because it
+keeps one reward table per target, could also exploit an arm that does not apply to the payload (for example `text_inline` for a
+table). It now explores and exploits only among the arms that apply: the table arms, or the unstructured arms when the hints carry
+`raw_bytes` (`python-server/tests/test_format_mab.py`). The replay above cannot show the effect, because all four of its arms always apply.
 
 #### 7. How often results repeat
 
@@ -1249,7 +1289,7 @@ rows the download.
 | bytes 1 MB (incompressible) | brotli | 1,000,005 / 1,000,005 | 7.5 | 7.4 | 0.98x |
 | bytes 1 MB (incompressible) | selector min_latency | 1,000,000 / 1,000,000 | 27.3 | 28.5 | 1.04x |
 
-Checks the benchmark clients above do not run, measured separately: client sha256 over a payload runs at 2,999 MB/s (0.33 ms per MB); verifying one grant signature takes 39 us and signing one takes 16 us.
+Checks the benchmark clients above do not run, measured separately: client sha256 over a payload runs at 3,326 MB/s (0.30 ms per MB); verifying one grant signature takes 38 us and signing one takes 15 us.
 
 Reading it. Wire bytes are identical with the defences on, so nothing here changes what a slow link carries. On BIRD the
 cost is within noise (about 2%): results are small and registration has already encoded them, so the grant digest is free
@@ -1260,6 +1300,377 @@ where the grant forces an encode at mint time (among the table arms `arrow_ipc_b
 this run did not isolate it. Two limits: the benchmark clients do not verify grants or digests, so the client-side checks are costed
 separately in the last line (hashing at memory speed, a signature check in tens of microseconds), and localhost hides what
 matters on a real link, where these extra milliseconds are small next to transfer time but a forced encode of a large table is not.
+
+### 19. Transport: early termination, Arrow Flight and the HTTP protocol
+
+Three questions about the data plane itself, each asked on the kernel-shaped two-container link of section 16 (both machines
+shape their egress with `tc netem`; profiles as there, plus WAN with 1% loss for the protocol runs). The client reaches
+the server directly, with no socat hop, so every arm takes the same path. Five measured repetitions after one warm-up, arm order
+shuffled per repetition, medians. Bytes are the client NIC's receive counter (and transmit counter for the protocol runs), so they
+include headers and anything the server kept sending after the client stopped. Every fetch uses a new connection.
+
+Expectations recorded before the full runs: HTTP/3 saves about one round trip against HTTP/1.1 or HTTP/2 over TLS on a cold
+connection and matters most for parallel fetches under loss; stopping a stream early saves less than the proportional bytes because
+data is already in flight (the pattern was visible in a one-repetition WAN run before the full sweeps).
+
+| # | question | verdict |
+|---|---|---|
+| 1 | does a chunk stream deliver first rows and stop early better than a blob? | **yes for time, less for bytes**: on cellular the first rows arrive 2.9x to 4.3x sooner than from a Parquet blob, and stopping at 10% takes 2.0x to 3.2x less time, but 24% to 34% of the full bytes still arrive, not 10%; 0.4 to 1.0 MB overshoots on WAN and cellular, and on a 2.3 MB table a 50% stop on WAN received all of it |
+| 2 | how does TransForm compare with Arrow Flight? | **equal on the transport, different in the payload**: with the same zstd Arrow batches, Flight is within 4% of TransForm's Parquet stream on TPC-DS on WAN and cellular, and 14% to 18% slower on the mixed table, where Parquet's encodings send 16% fewer bytes; Flight with no compression is 1.2x to 8.1x slower than with zstd; the standard GetFlightInfo step costs one round trip |
+| 3 | does the HTTP version matter (HTTP/1.1, HTTP/1.1 + TLS, HTTP/2 + TLS, HTTP/3)? | **at the start of a connection, not once it is warm**: on WAN a cold HTTP/3 fetch gets its first byte one round trip (0.085 s) before TLS over TCP and finishes 39% sooner on 100 KB, 27% on 1 MB, 15% on 7.5 MB and 8% on 11 MB; on a warm connection all four are within 7%; eight simultaneous fetches on new connections are fastest with plain HTTP/1.1's eight connections and slowest with HTTP/2 (0.79 s against 0.47 s for 100 KB); at 1% loss the five repetitions do not separate the variants (two of the three TCP variants had interquartile ranges of 38% and 115% on the 8 MB payload), though HTTP/3 has the lowest median on both large payloads; cellular, bad wifi and parallel fetches under loss are not run |
+
+#### Method details
+
+`benchmarks/netem_docker/transport.py` fetches one table in units of 8192 rows and stops when it has decoded a target share of
+the rows (the first unit, 10%, 50% or all). Tables: the first 100,000 rows of TPC-DS `catalog_sales` (34 numeric columns) and
+a 100,000-row table of 6 columns with strings and timestamps. TransForm arms run on the unmodified Python server (zstd for Parquet and Arrow
+IPC, the section 12 default) with a counter on its stream generators; Flight serves the same tables with the same batch size over `grpc+tcp` (no TLS,
+as the HTTP data plane here is plain HTTP). Arms: Parquet and Arrow IPC blobs and streams, Flight with no compression, lz4 and zstd and
+with a GetFlightInfo step first, and JSON on the fast links. The descriptor call is not in the data-plane times: both designs need
+one MCP call or equivalent first.
+
+#### Table `mixed` (13 units of 8192 rows)
+
+Time until the first rows are decoded (median s, data plane only; blobs and JSON deliver nothing until the whole file is down and decoded).
+
+| arm | unshaped | LAN | WAN | cellular |
+|---|---|---|---|---|
+| json | 2.326 | 2.550 | - | - |
+| parquet_blob | 0.009 | 0.050 | 0.927 | 2.744 |
+| arrow_blob | 0.006 | 0.055 | 1.050 | 3.368 |
+| parquet_stream | 0.026 | 0.043 | 0.478 | 0.945 |
+| arrow_stream | 0.003 | 0.020 | 0.526 | 1.029 |
+| flight_none | 0.004 | 0.027 | 0.686 | 1.431 |
+| flight_lz4 | 0.004 | 0.024 | 0.612 | 1.286 |
+| flight_zstd | 0.005 | 0.022 | 0.593 | 1.180 |
+| flight_zstd_info | 0.007 | 0.025 | 0.674 | 1.345 |
+
+Whole table (median s to decode every row; MB that reached the client's NIC).
+
+| arm | unshaped | LAN | WAN | cellular |
+|---|---|---|---|---|
+| json | 2.33 s, 34.05 MB | 2.55 s, 34.05 MB | - | - |
+| parquet_blob | 0.01 s, 2.29 MB | 0.05 s, 2.29 MB | 0.93 s, 2.32 MB | 2.74 s, 2.34 MB |
+| arrow_blob | 0.01 s, 3.05 MB | 0.06 s, 3.05 MB | 1.05 s, 3.08 MB | 3.37 s, 3.11 MB |
+| parquet_stream | 0.04 s, 2.33 MB | 0.06 s, 2.33 MB | 0.95 s, 2.35 MB | 2.79 s, 2.38 MB |
+| arrow_stream | 0.01 s, 3.00 MB | 0.05 s, 3.00 MB | 1.06 s, 3.03 MB | 3.33 s, 3.07 MB |
+| flight_none | 0.01 s, 6.29 MB | 0.07 s, 6.29 MB | 1.67 s, 6.33 MB | 6.23 s, 6.44 MB |
+| flight_lz4 | 0.01 s, 4.36 MB | 0.07 s, 4.36 MB | 1.34 s, 4.41 MB | 4.62 s, 4.46 MB |
+| flight_zstd | 0.01 s, 2.77 MB | 0.06 s, 2.77 MB | 1.08 s, 2.80 MB | 3.30 s, 2.84 MB |
+| flight_zstd_info | 0.01 s, 2.77 MB | 0.06 s, 2.77 MB | 1.16 s, 2.80 MB | 3.47 s, 2.83 MB |
+
+Stopping early: time to the target share of rows (median s), MB at the NIC when the client had them, MB once the link went quiet, and chunks or batches the server produced against the share needed.
+
+**unshaped**
+
+| arm | stop at | s | MB at cut | MB once quiet | server units / needed |
+|---|---|---|---|---|---|
+| parquet_stream | first | 0.03 | 0.38 | 0.38 | 3 / 1 |
+| parquet_stream | 10% | 0.03 | 0.51 | 0.51 | 4 / 2 |
+| parquet_stream | 50% | 0.03 | 1.53 | 1.53 | 9 / 7 |
+| parquet_stream | 100% | 0.04 | 2.33 | 2.33 | 13 / 13 |
+| arrow_stream | first | 0.00 | 0.49 | 0.49 | 3 / 1 |
+| arrow_stream | 10% | 0.00 | 0.74 | 0.74 | 4 / 2 |
+| arrow_stream | 50% | 0.01 | 1.97 | 1.97 | 9 / 7 |
+| arrow_stream | 100% | 0.01 | 3.00 | 3.00 | 13 / 13 |
+| flight_zstd | first | 0.01 | 0.46 | 0.46 | 3 / 1 |
+| flight_zstd | 10% | 0.01 | 0.68 | 0.68 | 4 / 2 |
+| flight_zstd | 50% | 0.01 | 1.82 | 1.82 | 9 / 7 |
+| flight_zstd | 100% | 0.01 | 2.77 | 2.77 | 13 / 13 |
+| flight_none | first | 0.00 | 1.78 | 2.06 | 6 / 1 |
+| flight_none | 10% | 0.00 | 2.49 | 2.61 | 7 / 2 |
+| flight_none | 50% | 0.01 | 5.67 | 5.67 | 12 / 7 |
+| flight_none | 100% | 0.01 | 6.29 | 6.29 | 13 / 13 |
+
+**LAN**
+
+| arm | stop at | s | MB at cut | MB once quiet | server units / needed |
+|---|---|---|---|---|---|
+| parquet_stream | first | 0.04 | 0.22 | 0.45 | 6 / 1 |
+| parquet_stream | 10% | 0.05 | 0.45 | 0.91 | 9 / 2 |
+| parquet_stream | 50% | 0.06 | 1.44 | 2.09 | 13 / 7 |
+| parquet_stream | 100% | 0.06 | 2.33 | 2.33 | 13 / 13 |
+| arrow_stream | first | 0.02 | 0.38 | 0.61 | 6 / 1 |
+| arrow_stream | 10% | 0.02 | 0.59 | 0.79 | 6 / 2 |
+| arrow_stream | 50% | 0.04 | 1.79 | 2.03 | 12 / 7 |
+| arrow_stream | 100% | 0.05 | 3.00 | 3.00 | 13 / 13 |
+| flight_zstd | first | 0.02 | 0.36 | 0.49 | 5 / 1 |
+| flight_zstd | 10% | 0.04 | 0.50 | 0.57 | 5 / 2 |
+| flight_zstd | 50% | 0.05 | 1.71 | 1.93 | 11 / 7 |
+| flight_zstd | 100% | 0.06 | 2.77 | 2.77 | 13 / 13 |
+| flight_none | first | 0.03 | 0.69 | 1.16 | 5 / 1 |
+| flight_none | 10% | 0.03 | 1.12 | 1.73 | 7 / 2 |
+| flight_none | 50% | 0.05 | 3.70 | 4.35 | 12 / 7 |
+| flight_none | 100% | 0.07 | 6.29 | 6.29 | 13 / 13 |
+
+**WAN**
+
+| arm | stop at | s | MB at cut | MB once quiet | server units / needed |
+|---|---|---|---|---|---|
+| parquet_stream | first | 0.48 | 0.22 | 0.41 | 6 / 1 |
+| parquet_stream | 10% | 0.58 | 0.41 | 0.81 | 9 / 2 |
+| parquet_stream | 50% | 0.78 | 1.37 | 2.35 | 13 / 7 |
+| parquet_stream | 100% | 0.95 | 2.35 | 2.35 | 13 / 13 |
+| arrow_stream | first | 0.53 | 0.27 | 0.50 | 6 / 1 |
+| arrow_stream | 10% | 0.62 | 0.52 | 1.02 | 8 / 2 |
+| arrow_stream | 50% | 0.83 | 1.75 | 2.53 | 13 / 7 |
+| arrow_stream | 100% | 1.06 | 3.03 | 3.03 | 13 / 13 |
+| flight_zstd | first | 0.59 | 0.25 | 0.49 | 5 / 1 |
+| flight_zstd | 10% | 0.68 | 0.47 | 0.96 | 8 / 2 |
+| flight_zstd | 50% | 0.87 | 1.62 | 2.36 | 13 / 7 |
+| flight_zstd | 100% | 1.08 | 2.80 | 2.80 | 13 / 13 |
+| flight_none | first | 0.69 | 0.54 | 1.06 | 5 / 1 |
+| flight_none | 10% | 0.79 | 1.05 | 1.79 | 7 / 2 |
+| flight_none | 50% | 1.22 | 3.65 | 4.48 | 12 / 7 |
+| flight_none | 100% | 1.67 | 6.33 | 6.33 | 13 / 13 |
+
+**cellular**
+
+| arm | stop at | s | MB at cut | MB once quiet | server units / needed |
+|---|---|---|---|---|---|
+| parquet_stream | first | 0.95 | 0.20 | 0.42 | 5 / 1 |
+| parquet_stream | 10% | 1.21 | 0.40 | 0.81 | 8 / 2 |
+| parquet_stream | 50% | 1.97 | 1.38 | 1.73 | 13 / 7 |
+| parquet_stream | 100% | 2.79 | 2.38 | 2.38 | 13 / 13 |
+| arrow_stream | first | 1.03 | 0.26 | 0.52 | 5 / 1 |
+| arrow_stream | 10% | 1.23 | 0.51 | 1.00 | 7 / 2 |
+| arrow_stream | 50% | 2.34 | 1.77 | 2.23 | 13 / 7 |
+| arrow_stream | 100% | 3.33 | 3.07 | 3.07 | 13 / 13 |
+| flight_zstd | first | 1.18 | 0.24 | 0.49 | 5 / 1 |
+| flight_zstd | 10% | 1.37 | 0.47 | 0.95 | 9 / 2 |
+| flight_zstd | 50% | 2.36 | 1.63 | 2.25 | 13 / 7 |
+| flight_zstd | 100% | 3.30 | 2.84 | 2.84 | 13 / 13 |
+| flight_none | first | 1.43 | 0.53 | 1.03 | 5 / 1 |
+| flight_none | 10% | 1.84 | 1.06 | 1.58 | 6 / 2 |
+| flight_none | 50% | 4.01 | 3.70 | 3.99 | 11 / 7 |
+| flight_none | 100% | 6.23 | 6.44 | 6.44 | 13 / 13 |
+
+#### Table `tpcds` (13 units of 8192 rows)
+
+Time until the first rows are decoded (median s, data plane only; blobs and JSON deliver nothing until the whole file is down and decoded).
+
+| arm | unshaped | LAN | WAN | cellular |
+|---|---|---|---|---|
+| json | 6.333 | 7.696 | - | - |
+| parquet_blob | 0.014 | 0.086 | 1.495 | 5.580 |
+| arrow_blob | 0.010 | 0.078 | 1.549 | 5.803 |
+| parquet_stream | 0.058 | 0.079 | 0.670 | 1.305 |
+| arrow_stream | 0.005 | 0.028 | 0.618 | 1.258 |
+| flight_none | 0.008 | 0.054 | 1.155 | 3.716 |
+| flight_lz4 | 0.007 | 0.033 | 0.729 | 1.635 |
+| flight_zstd | 0.008 | 0.031 | 0.688 | 1.397 |
+| flight_zstd_info | 0.009 | 0.035 | 0.764 | 1.566 |
+
+Whole table (median s to decode every row; MB that reached the client's NIC).
+
+| arm | unshaped | LAN | WAN | cellular |
+|---|---|---|---|---|
+| json | 6.33 s, 210.50 MB | 7.70 s, 210.48 MB | - | - |
+| parquet_blob | 0.01 s, 5.64 MB | 0.09 s, 5.64 MB | 1.49 s, 5.69 MB | 5.58 s, 5.78 MB |
+| arrow_blob | 0.01 s, 5.91 MB | 0.08 s, 5.91 MB | 1.55 s, 5.97 MB | 5.80 s, 6.05 MB |
+| parquet_stream | 0.12 s, 6.11 MB | 0.14 s, 6.11 MB | 1.60 s, 6.14 MB | 5.99 s, 6.26 MB |
+| arrow_stream | 0.02 s, 5.91 MB | 0.07 s, 5.91 MB | 1.53 s, 5.95 MB | 5.79 s, 6.05 MB |
+| flight_none | 0.02 s, 39.63 MB | 0.36 s, 39.63 MB | 7.23 s, 40.00 MB | 46.55 s, 40.59 MB |
+| flight_lz4 | 0.02 s, 9.50 MB | 0.11 s, 9.50 MB | 2.21 s, 9.57 MB | 8.95 s, 9.73 MB |
+| flight_zstd | 0.02 s, 5.74 MB | 0.08 s, 5.73 MB | 1.58 s, 5.77 MB | 5.78 s, 5.87 MB |
+| flight_zstd_info | 0.02 s, 5.74 MB | 0.09 s, 5.74 MB | 1.66 s, 5.77 MB | 5.96 s, 5.87 MB |
+
+Stopping early: time to the target share of rows (median s), MB at the NIC when the client had them, MB once the link went quiet, and chunks or batches the server produced against the share needed.
+
+**unshaped**
+
+| arm | stop at | s | MB at cut | MB once quiet | server units / needed |
+|---|---|---|---|---|---|
+| parquet_stream | first | 0.06 | 0.50 | 0.50 | 2 / 1 |
+| parquet_stream | 10% | 0.06 | 1.00 | 1.00 | 3 / 2 |
+| parquet_stream | 50% | 0.09 | 3.49 | 3.49 | 8 / 7 |
+| parquet_stream | 100% | 0.12 | 6.11 | 6.11 | 13 / 13 |
+| arrow_stream | first | 0.00 | 0.60 | 0.62 | 3 / 1 |
+| arrow_stream | 10% | 0.01 | 1.30 | 1.30 | 4 / 2 |
+| arrow_stream | 50% | 0.01 | 3.87 | 3.87 | 9 / 7 |
+| arrow_stream | 100% | 0.02 | 5.91 | 5.91 | 13 / 13 |
+| flight_zstd | first | 0.01 | 0.94 | 0.94 | 3 / 1 |
+| flight_zstd | 10% | 0.01 | 1.41 | 1.41 | 4 / 2 |
+| flight_zstd | 50% | 0.02 | 3.77 | 3.77 | 9 / 7 |
+| flight_zstd | 100% | 0.02 | 5.74 | 5.74 | 13 / 13 |
+| flight_none | first | 0.01 | 6.56 | 6.57 | 3 / 1 |
+| flight_none | 10% | 0.01 | 9.74 | 9.74 | 4 / 2 |
+| flight_none | 50% | 0.01 | 26.04 | 26.98 | 9 / 7 |
+| flight_none | 100% | 0.02 | 39.63 | 39.63 | 13 / 13 |
+
+**LAN**
+
+| arm | stop at | s | MB at cut | MB once quiet | server units / needed |
+|---|---|---|---|---|---|
+| parquet_stream | first | 0.08 | 0.77 | 1.28 | 4 / 1 |
+| parquet_stream | 10% | 0.08 | 1.20 | 1.63 | 5 / 2 |
+| parquet_stream | 50% | 0.11 | 3.49 | 3.99 | 9 / 7 |
+| parquet_stream | 100% | 0.14 | 6.11 | 6.11 | 13 / 13 |
+| arrow_stream | first | 0.03 | 0.64 | 1.14 | 6 / 1 |
+| arrow_stream | 10% | 0.03 | 1.09 | 1.49 | 6 / 2 |
+| arrow_stream | 50% | 0.05 | 3.58 | 4.20 | 12 / 7 |
+| arrow_stream | 100% | 0.07 | 5.91 | 5.91 | 13 / 13 |
+| flight_zstd | first | 0.03 | 0.65 | 0.94 | 4 / 1 |
+| flight_zstd | 10% | 0.04 | 1.00 | 1.74 | 7 / 2 |
+| flight_zstd | 50% | 0.06 | 3.42 | 4.25 | 13 / 7 |
+| flight_zstd | 100% | 0.08 | 5.73 | 5.73 | 13 / 13 |
+| flight_none | first | 0.05 | 3.39 | 3.74 | 2 / 1 |
+| flight_none | 10% | 0.09 | 6.68 | 7.10 | 4 / 2 |
+| flight_none | 50% | 0.22 | 22.89 | 24.38 | 10 / 7 |
+| flight_none | 100% | 0.36 | 39.63 | 39.63 | 13 / 13 |
+
+**WAN**
+
+| arm | stop at | s | MB at cut | MB once quiet | server units / needed |
+|---|---|---|---|---|---|
+| parquet_stream | first | 0.67 | 0.53 | 1.05 | 5 / 1 |
+| parquet_stream | 10% | 0.75 | 1.03 | 1.58 | 6 / 2 |
+| parquet_stream | 50% | 1.16 | 3.55 | 4.65 | 13 / 7 |
+| parquet_stream | 100% | 1.60 | 6.14 | 6.14 | 13 / 13 |
+| arrow_stream | first | 0.62 | 0.51 | 1.02 | 5 / 1 |
+| arrow_stream | 10% | 0.73 | 0.99 | 1.98 | 9 / 2 |
+| arrow_stream | 50% | 1.14 | 3.44 | 5.00 | 13 / 7 |
+| arrow_stream | 100% | 1.53 | 5.95 | 5.95 | 13 / 13 |
+| flight_zstd | first | 0.69 | 0.51 | 1.02 | 5 / 1 |
+| flight_zstd | 10% | 0.77 | 0.96 | 1.93 | 8 / 2 |
+| flight_zstd | 50% | 1.16 | 3.33 | 5.16 | 13 / 7 |
+| flight_zstd | 100% | 1.58 | 5.77 | 5.77 | 13 / 13 |
+| flight_none | first | 1.16 | 3.29 | 4.11 | 2 / 1 |
+| flight_none | 10% | 1.70 | 6.57 | 7.57 | 4 / 2 |
+| flight_none | 50% | 4.42 | 22.95 | 24.73 | 9 / 7 |
+| flight_none | 100% | 7.23 | 40.00 | 40.00 | 13 / 13 |
+
+**cellular**
+
+| arm | stop at | s | MB at cut | MB once quiet | server units / needed |
+|---|---|---|---|---|---|
+| parquet_stream | first | 1.30 | 0.52 | 1.02 | 5 / 1 |
+| parquet_stream | 10% | 1.72 | 1.03 | 1.54 | 6 / 2 |
+| parquet_stream | 50% | 3.81 | 3.58 | 4.22 | 11 / 7 |
+| parquet_stream | 100% | 5.99 | 6.26 | 6.26 | 13 / 13 |
+| arrow_stream | first | 1.26 | 0.50 | 0.99 | 4 / 1 |
+| arrow_stream | 10% | 1.76 | 0.99 | 1.48 | 6 / 2 |
+| arrow_stream | 50% | 3.71 | 3.47 | 3.92 | 11 / 7 |
+| arrow_stream | 100% | 5.79 | 6.05 | 6.05 | 13 / 13 |
+| flight_zstd | first | 1.40 | 0.49 | 0.99 | 5 / 1 |
+| flight_zstd | 10% | 1.78 | 0.96 | 1.49 | 7 / 2 |
+| flight_zstd | 50% | 3.78 | 3.37 | 3.97 | 12 / 7 |
+| flight_zstd | 100% | 5.78 | 5.87 | 5.87 | 13 / 13 |
+| flight_none | first | 3.72 | 3.33 | 3.77 | 2 / 1 |
+| flight_none | 10% | 6.48 | 6.66 | 7.21 | 4 / 2 |
+| flight_none | 50% | 23.20 | 23.28 | 23.41 | 9 / 7 |
+| flight_none | 100% | 46.55 | 40.59 | 40.59 | 13 / 13 |
+
+#### What the data says
+
+Stopping early. A stream's first unit is about 0.2 to 0.5 MB, so first rows cost a round trip plus slow start on that much
+data rather than the whole table. On cellular that is 1.3 s against 5.6 s for the TPC-DS blob and 0.9 s against 2.7 s for
+the mixed one. The bytes saved are smaller than the share skipped: after the client stops, what is already in the pipe still arrives
+(0.4 to 1.0 MB at the 10% stop on WAN and cellular, with both streams and Flight), and the server keeps producing units (5 to 9 produced for 1
+or 2 needed). On a result of a few MB this is most of the table.
+
+Flight. Where the payload is the same (zstd Arrow batches), the transports are indistinguishable: TransForm's Arrow IPC stream
+and Flight with zstd are within 3% of each other on WAN and cellular (both tables), and the extra GetFlightInfo exchange costs one round trip (0.08 s on
+WAN, 0.17 s on cellular). Two things do differ. Flight's default of no compression sends 6.9x the bytes of zstd on TPC-DS and 2.3x
+on the mixed table. And TransForm's Parquet carries encodings that Arrow IPC with zstd does not: dictionary encoding on the mixed table sends 16% fewer
+bytes than the same table through Flight. On an unshaped link Flight is faster (0.02 s against 0.12 s for the TPC-DS table)
+because it sends Arrow batches already in memory, while the TransForm stream encodes Parquet per request; that is an implementation difference, not
+a protocol one, and it disappears once the link is the bottleneck.
+
+#### Protocol runs: method
+
+Caddy serves pre-encoded payloads as static files (the data plane's `GET` returns bytes, so the server's own encoding is out
+of the picture here): TPC-DS rows as zstd Parquet at about 0.1, 1 and 7.5 MB, and the 1 MB file's rows as compact JSON (11 MB). A Go client
+(`benchmarks/netem_docker/protocols/main.go`) speaks plain HTTP/1.1, HTTP/1.1 and HTTP/2 over TLS (a self-signed certificate, verification
+off, for a test link) and HTTP/3 (quic-go, which is also Caddy's HTTP/3 stack, so the congestion controller is quic-go's, not Linux TCP's). Each cold
+measurement uses a new transport with no session resumption or 0-RTT; a warm measurement is a second request on the connection that has just carried the
+same payload. Profiles: LAN, WAN, and WAN with 1% loss (40 ms each way, 50 Mbit/s).
+
+Cells show the median of five repetitions; where the interquartile range exceeds 20% of the median it is shown.
+
+One request on a new connection: seconds until the payload is complete (median).
+
+| profile | payload | HTTP/1.1 | HTTP/1.1 + TLS | HTTP/2 + TLS | HTTP/3 |
+|---|---|---|---|---|---|
+| LAN | p100k.parquet | 0.015 | 0.021 | 0.022 (IQR 22%) | 0.016 |
+| LAN | p1m.parquet | 0.026 | 0.035 | 0.034 (IQR 22%) | 0.027 (IQR 21%) |
+| LAN | p8m.parquet | 0.079 | 0.089 | 0.097 (IQR 93%) | 0.083 |
+| LAN | j1m.json | 0.109 | 0.116 | 0.119 (IQR 74%) | 0.111 |
+| WAN | p100k.parquet | 0.436 | 0.522 | 0.519 | 0.320 |
+| WAN | p1m.parquet | 0.718 | 0.803 | 0.812 | 0.588 |
+| WAN | p8m.parquet | 1.796 | 1.988 (IQR 21%) | 1.949 (IQR 21%) | 1.687 |
+| WAN | j1m.json | 2.384 | 2.480 | 2.484 | 2.279 |
+| WAN 1% loss | p100k.parquet | 0.435 | 0.528 (IQR 106%) | 0.518 | 0.366 |
+| WAN 1% loss | p1m.parquet | 2.091 (IQR 175%) | 0.828 | 0.886 (IQR 84%) | 1.977 (IQR 71%) |
+| WAN 1% loss | p8m.parquet | 22.617 | 19.464 (IQR 38%) | 16.357 (IQR 115%) | 16.047 |
+| WAN 1% loss | j1m.json | 35.717 (IQR 23%) | 29.712 (IQR 97%) | 27.785 (IQR 64%) | 25.296 |
+
+One request on a connection that has just carried the same payload (warm): seconds (median).
+
+| profile | payload | HTTP/1.1 | HTTP/1.1 + TLS | HTTP/2 + TLS | HTTP/3 |
+|---|---|---|---|---|---|
+| LAN | p100k.parquet | 0.007 (IQR 59%) | 0.007 | 0.008 (IQR 43%) | 0.007 (IQR 46%) |
+| LAN | p1m.parquet | 0.014 | 0.013 | 0.040 (IQR 73%) | 0.013 |
+| LAN | p8m.parquet | 0.067 | 0.067 | 0.069 | 0.069 |
+| LAN | j1m.json | 0.097 | 0.097 | 0.098 | 0.098 |
+| WAN | p100k.parquet | 0.182 | 0.179 | 0.183 | 0.172 |
+| WAN | p1m.parquet | 0.278 | 0.277 | 0.290 | 0.274 |
+| WAN | p8m.parquet | 1.339 | 1.335 | 1.357 | 1.367 |
+| WAN | j1m.json | 1.925 | 1.929 | 1.936 | 1.957 |
+| WAN 1% loss | p100k.parquet | 0.263 (IQR 127%) | 0.180 (IQR 48%) | 0.351 (IQR 95%) | 0.198 (IQR 55%) |
+| WAN 1% loss | p1m.parquet | 0.954 (IQR 246%) | 1.564 (IQR 209%) | 0.382 (IQR 1084%) | 2.440 (IQR 77%) |
+| WAN 1% loss | p8m.parquet | 27.934 (IQR 29%) | 28.071 | 26.987 | 18.726 |
+| WAN 1% loss | j1m.json | 41.333 | 40.674 | 36.838 | 26.472 (IQR 28%) |
+
+Eight simultaneous requests for the same payload on new connections: seconds until all eight are complete (median).
+
+| profile | payload | HTTP/1.1 | HTTP/1.1 + TLS | HTTP/2 + TLS | HTTP/3 |
+|---|---|---|---|---|---|
+| LAN | p100k.parquet | 0.020 | 0.023 | 0.034 | 0.029 |
+| LAN | p1m.parquet | 0.087 | 0.084 | 0.093 | 0.088 |
+| WAN | p100k.parquet | 0.471 | 0.578 | 0.791 | 0.560 |
+| WAN | p1m.parquet | 1.701 | 1.921 | 2.025 | 1.785 |
+
+Seconds until the first byte of the response (median, one request, new connection).
+
+| profile | payload | HTTP/1.1 | HTTP/1.1 + TLS | HTTP/2 + TLS | HTTP/3 |
+|---|---|---|---|---|---|
+| LAN | p100k.parquet | 0.008 | 0.012 | 0.014 | 0.011 |
+| WAN | p100k.parquet | 0.176 | 0.261 | 0.261 | 0.176 |
+| WAN 1% loss | p100k.parquet | 0.172 | 0.265 | 0.259 | 0.177 |
+
+Bytes at the client's NIC (received plus sent, median) for one cold fetch of `p1m.parquet`, in kB.
+
+| profile | HTTP/1.1 | HTTP/1.1 + TLS | HTTP/2 + TLS | HTTP/3 |
+|---|---|---|---|---|
+| LAN | 1,021 | 1,027 | 1,043 | 1,072 |
+| WAN | 1,049 | 1,054 | 1,072 | 1,085 |
+| WAN 1% loss | 1,060 | 1,054 | 1,072 | 1,096 |
+
+#### What the protocol data says
+
+Only connection setup and the initial window differ. The first byte of a cold fetch arrives after two round trips for plain
+HTTP/1.1 (TCP handshake, then request) and for HTTP/3 (combined handshake, then request) and after three for TLS over TCP (0.176 s against 0.261 s on WAN, where a round trip is 0.08 s). HTTP/3 then also finishes sooner than plain HTTP/1.1 (0.320 s
+against 0.436 s for 100 KB), which a shorter handshake does not explain; the likely cause is a larger initial window or pacing in quic-go, and it was not isolated. The
+gain shrinks with size (8% against TLS over TCP and 4% against plain at 11 MB) and on a warm connection it is gone (all four within 7% at every size on WAN). On a LAN every cell is
+under 0.12 s and the protocols differ by at most 20 ms. The bytes cost is small: one 1 MB fetch moved 1,021 kB plain, 1,043 kB over HTTP/2 and 1,072 kB over HTTP/3.
+
+Multiplexing did not help here. Eight simultaneous cold fetches finished soonest with plain HTTP/1.1 (0.47 s for 100 KB on WAN), because its eight connections each get a
+fresh congestion window, and latest with HTTP/2 (0.79 s), whose single connection shares one. Under 1% loss, throughput on one 8 MB file falls to about 3 Mbit/s whatever the
+protocol; medians are 16.0 s (HTTP/3), 16.4 s (HTTP/2), 19.5 s (HTTP/1.1 + TLS) and 22.6 s (plain), but with five repetitions the interquartile ranges of HTTP/1.1 + TLS and HTTP/2 are
+38% and 115% of their medians, while HTTP/3's stayed under 20% on both large payloads. That points to HTTP/3 being at least as good under loss; it does not establish it.
+
+#### Limits (section 19)
+
+The emulated links use a very deep queue (`limit 100000`), which probably enlarges the overshoot; it has not been rerun with a queue sized to
+the bandwidth-delay product. Results are streams of an already materialised table, so first-rows times are a lower bound against a live
+query; streaming from the database cursor is not tested. Flight runs without TLS to match the plain-HTTP data plane. One cellular fetch (the
+mixed table, Arrow IPC stream, 50% stop) timed out and is missing from its cell. The host went to sleep during the cellular transport run
+(181 of its 215 minutes, from the macOS power log), which probably caused that timeout; the slowest recorded fetch was 51 s, in line with
+the 40 to 50 s expected for 40 MB at 10 Mbit/s, so sleep does not appear to have inflated any measurement, but it was not ruled out
+fetch by fetch. Not run: bad wifi for either experiment, cellular and parallel fetches under loss for the protocol comparison; the 1% loss
+single-request warm fetch of the 11 MB JSON has four of five repetitions for HTTP/1.1 + TLS, HTTP/2 and HTTP/3 (the run was stopped). The protocol comparison uses static files and quic-go's congestion
+control for HTTP/3 against the Linux kernel's for TCP, so part of the HTTP/3 gap may be the controller, not the protocol.
 
 ## Findings
 
@@ -1332,6 +1743,13 @@ matters on a real link, where these extra milliseconds are small next to transfe
   keyed by link beat the best single arm only when each draw counts equally; conditional fetch saves 89 to 96% of a repeat
   fetch of one URL, but the ETag is per handle, and results repeat across queries in 10.9% of the BIRD dev gold queries
   and 0.9% of its bytes (an upper bound for content-addressed reuse, which is not built).
+- **Transport (section 19).** On a kernel-shaped cellular link a chunk stream delivers first rows 2.9x to 4.3x sooner than a
+  Parquet blob and stopping at 10% takes 2.0x to 3.2x less time, but 24% to 34% of the bytes still arrive because data in
+  flight keeps coming. Arrow Flight with the same zstd Arrow batches is within 3% of TransForm's Arrow stream on WAN and cellular; against the
+  Parquet stream it is within 4% on TPC-DS and 14% to 18% slower on a mixed table, where Parquet's encodings send 16% fewer bytes; without compression it sends
+  2.3x to 6.9x the bytes. HTTP/3 reaches the first byte one round trip before TLS over TCP and finishes a cold WAN fetch 8% to 39% sooner, a gap that shrinks with
+  size and vanishes on a warm connection; eight simultaneous cold fetches are fastest over plain HTTP/1.1's eight connections. Under 1% loss five repetitions do not
+  separate the protocols. Cellular and bad wifi for the protocol comparison, and every bad wifi run, were not done.
 - **Table codec defaults (section 12).** zstd for Parquet and Arrow IPC cuts bytes 13% to 40% (Parquet) and 74% to 91%
   (Arrow IPC) on BIRD, with total latency within 4% on localhost, LAN and WAN for the typical query. On BIRD results above
   50K cells over cellular, Arrow IPC went from 19.0 s to 5.2 s (5 queries). On TPC-DS the min_bytes and min_latency selector's total latency
@@ -1382,6 +1800,8 @@ benchmarks/scripts/run_attacks_defended.sh    # section 18, attacks with TRANSFO
 benchmarks/scripts/run_security_overhead.sh   # section 18, overhead (about 3 minutes)
 .venv/bin/python -m benchmarks.analysis.injection   # section 18, envelope on a model (needs Ollama)
 benchmarks/scripts/run_netem_docker.sh        # section 16 (needs Docker running); see its QUICK_ARGS for section 17
+benchmarks/scripts/run_transport.sh           # section 19, early termination and Flight (Docker; TRANSPORT_ROWS=100000 as run here)
+benchmarks/scripts/run_protocols.sh           # section 19, HTTP/1.1, HTTP/2 and HTTP/3 (Docker)
 benchmarks/scripts/run_tpcds_once.sh <csv>   # section 17, item 1
 benchmarks/scripts/run_defaults.sh            # section 12 (BIRD); run_defaults_tpcds.sh for TPC-DS
 benchmarks/scripts/run_lossy.sh               # section 10 (needs ollama with qwen2.5vl:7b and mlx-whisper)

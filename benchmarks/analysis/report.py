@@ -728,7 +728,7 @@ data is already in flight (the pattern was visible in a one-repetition WAN run b
 |---|---|---|
 | 1 | does a chunk stream deliver first rows and stop early better than a blob? | **yes for time, less for bytes**: on cellular the first rows arrive 2.9x to 4.3x sooner than from a Parquet blob, and stopping at 10% takes 2.0x to 3.2x less time, but 24% to 34% of the full bytes still arrive, not 10%; 0.4 to 1.0 MB overshoots on WAN and cellular, and on a 2.3 MB table a 50% stop on WAN received all of it |
 | 2 | how does TransForm compare with Arrow Flight? | **equal on the transport, different in the payload**: with the same zstd Arrow batches, Flight is within 4% of TransForm's Parquet stream on TPC-DS on WAN and cellular, and 14% to 18% slower on the mixed table, where Parquet's encodings send 16% fewer bytes; Flight with no compression is 1.2x to 8.1x slower than with zstd; the standard GetFlightInfo step costs one round trip |
-PROTOCOLS_PENDING
+| 3 | does the HTTP version matter (HTTP/1.1, HTTP/1.1 + TLS, HTTP/2 + TLS, HTTP/3)? | **at the start of a connection, not once it is warm**: on WAN a cold HTTP/3 fetch gets its first byte one round trip (0.085 s) before TLS over TCP and finishes 39% sooner on 100 KB, 27% on 1 MB, 15% on 7.5 MB and 8% on 11 MB; on a warm connection all four are within 7%; eight simultaneous fetches on new connections are fastest with plain HTTP/1.1's eight connections and slowest with HTTP/2 (0.79 s against 0.47 s for 100 KB); at 1% loss the five repetitions do not separate the variants (two of the three TCP variants had interquartile ranges of 38% and 115% on the 8 MB payload), though HTTP/3 has the lowest median on both large payloads; cellular, bad wifi and parallel fetches under loss are not run |
 
 #### Method details
 
@@ -758,12 +758,41 @@ bytes than the same table through Flight. On an unshaped link Flight is faster (
 because it sends Arrow batches already in memory, while the TransForm stream encodes Parquet per request; that is an implementation difference, not
 a protocol one, and it disappears once the link is the bottleneck.
 
+#### Protocol runs: method
+
+Caddy serves pre-encoded payloads as static files (the data plane's `GET` returns bytes, so the server's own encoding is out
+of the picture here): TPC-DS rows as zstd Parquet at about 0.1, 1 and 7.5 MB, and the 1 MB file's rows as compact JSON (11 MB). A Go client
+(`benchmarks/netem_docker/protocols/main.go`) speaks plain HTTP/1.1, HTTP/1.1 and HTTP/2 over TLS (a self-signed certificate, verification
+off, for a test link) and HTTP/3 (quic-go, which is also Caddy's HTTP/3 stack, so the congestion controller is quic-go's, not Linux TCP's). Each cold
+measurement uses a new transport with no session resumption or 0-RTT; a warm measurement is a second request on the connection that has just carried the
+same payload. Profiles: LAN, WAN, and WAN with 1% loss (40 ms each way, 50 Mbit/s).
+
+{protocols_block}
+
+#### What the protocol data says
+
+Only connection setup and the initial window differ. The first byte of a cold fetch arrives after two round trips for plain
+HTTP/1.1 (TCP handshake, then request) and for HTTP/3 (combined handshake, then request) and after three for TLS over TCP (0.176 s against 0.261 s on WAN, where a round trip is 0.08 s). HTTP/3 then also finishes sooner than plain HTTP/1.1 (0.320 s
+against 0.436 s for 100 KB), which a shorter handshake does not explain; the likely cause is a larger initial window or pacing in quic-go, and it was not isolated. The
+gain shrinks with size (8% against TLS over TCP and 4% against plain at 11 MB) and on a warm connection it is gone (all four within 7% at every size on WAN). On a LAN every cell is
+under 0.12 s and the protocols differ by at most 20 ms. The bytes cost is small: one 1 MB fetch moved 1,021 kB plain, 1,043 kB over HTTP/2 and 1,072 kB over HTTP/3.
+
+Multiplexing did not help here. Eight simultaneous cold fetches finished soonest with plain HTTP/1.1 (0.47 s for 100 KB on WAN), because its eight connections each get a
+fresh congestion window, and latest with HTTP/2 (0.79 s), whose single connection shares one. Under 1% loss, throughput on one 8 MB file falls to about 3 Mbit/s whatever the
+protocol; medians are 16.0 s (HTTP/3), 16.4 s (HTTP/2), 19.5 s (HTTP/1.1 + TLS) and 22.6 s (plain), but with five repetitions the interquartile ranges of HTTP/1.1 + TLS and HTTP/2 are
+38% and 115% of their medians, while HTTP/3's stayed under 20% on both large payloads. That points to HTTP/3 being at least as good under loss; it does not establish it.
+
 #### Limits (section 19)
 
 The emulated links use a very deep queue (`limit 100000`), which probably enlarges the overshoot; it has not been rerun with a queue sized to
 the bandwidth-delay product. Results are streams of an already materialised table, so first-rows times are a lower bound against a live
 query; streaming from the database cursor is not tested. Flight runs without TLS to match the plain-HTTP data plane. One cellular fetch (the
-mixed table, Arrow IPC stream, 50% stop) timed out and is missing from its cell. Bad wifi was run at 3 repetitions on the mixed table only.
+mixed table, Arrow IPC stream, 50% stop) timed out and is missing from its cell. The host went to sleep during the cellular transport run
+(181 of its 215 minutes, from the macOS power log), which probably caused that timeout; the slowest recorded fetch was 51 s, in line with
+the 40 to 50 s expected for 40 MB at 10 Mbit/s, so sleep does not appear to have inflated any measurement, but it was not ruled out
+fetch by fetch. Not run: bad wifi for either experiment, cellular and parallel fetches under loss for the protocol comparison; the 1% loss
+single-request warm fetch of the 11 MB JSON has four of five repetitions for HTTP/1.1 + TLS, HTTP/2 and HTTP/3 (the run was stopped). The protocol comparison uses static files and quic-go's congestion
+control for HTTP/3 against the Linux kernel's for TCP, so part of the HTTP/3 gap may be the controller, not the protocol.
 
 ## Findings
 
@@ -833,6 +862,13 @@ mixed table, Arrow IPC stream, 50% stop) timed out and is missing from its cell.
   keyed by link beat the best single arm only when each draw counts equally; conditional fetch saves 89 to 96% of a repeat
   fetch of one URL, but the ETag is per handle, and results repeat across queries in 10.9% of the BIRD dev gold queries
   and 0.9% of its bytes (an upper bound for content-addressed reuse, which is not built).
+- **Transport (section 19).** On a kernel-shaped cellular link a chunk stream delivers first rows 2.9x to 4.3x sooner than a
+  Parquet blob and stopping at 10% takes 2.0x to 3.2x less time, but 24% to 34% of the bytes still arrive because data in
+  flight keeps coming. Arrow Flight with the same zstd Arrow batches is within 3% of TransForm's Arrow stream on WAN and cellular; against the
+  Parquet stream it is within 4% on TPC-DS and 14% to 18% slower on a mixed table, where Parquet's encodings send 16% fewer bytes; without compression it sends
+  2.3x to 6.9x the bytes. HTTP/3 reaches the first byte one round trip before TLS over TCP and finishes a cold WAN fetch 8% to 39% sooner, a gap that shrinks with
+  size and vanishes on a warm connection; eight simultaneous cold fetches are fastest over plain HTTP/1.1's eight connections. Under 1% loss five repetitions do not
+  separate the protocols. Cellular and bad wifi for the protocol comparison, and every bad wifi run, were not done.
 - **Table codec defaults (section 12).** zstd for Parquet and Arrow IPC cuts bytes 13% to 40% (Parquet) and 74% to 91%
   (Arrow IPC) on BIRD, with total latency within 4% on localhost, LAN and WAN for the typical query. On BIRD results above
   50K cells over cellular, Arrow IPC went from 19.0 s to 5.2 s (5 queries). On TPC-DS the min_bytes and min_latency selector's total latency
